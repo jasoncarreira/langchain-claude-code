@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
+import contextvars
+import queue
+import threading
 from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Callable
@@ -21,8 +23,10 @@ from langchain_core.messages import (
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.runnables.config import ensure_config
 from langchain_core.tools import BaseTool
-from pydantic import Field
+from pydantic import Field, PrivateAttr
+from pydantic.errors import PydanticInvalidForJsonSchema
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
@@ -31,13 +35,15 @@ from claude_agent_sdk import (
     ResultMessage,
     TextBlock,
     ToolUseBlock,
+    ToolResultBlock,
     create_sdk_mcp_server,
     tool as sdk_tool,
 )
+from langchain_claude_code.claude_code_tools import ClaudeTool, normalize_tools
 
 
 class ClaudeCodeChatModel(BaseChatModel):
-    """LangChain chat model wrapping Claude Code Agent SDK.
+    """LangChain chat model wrapping Claude Code Agent SDK. 
     
     Uses ClaudeSDKClient for multi-turn conversations with full tool support.
     """
@@ -46,22 +52,26 @@ class ClaudeCodeChatModel(BaseChatModel):
     fallback_model: str | None = Field(default=None, description="Fallback model")
     system_prompt: str | None = Field(default=None, description="System prompt")
     permission_mode: str = Field(
-        default="acceptEdits",
+        default="default",
         description="Permission mode: default, acceptEdits, plan, bypassPermissions",
     )
-    allowed_tools: list[str] = Field(default_factory=list, description="Allowed tools")
-    disallowed_tools: list[str] = Field(default_factory=list, description="Disallowed tools")
+    allowed_tools: list[str | ClaudeTool] = Field(default_factory=list, description="Allowed tools")
+    disallowed_tools: list[str | ClaudeTool] = Field(default_factory=list, description="Disallowed tools")
     max_turns: int | None = Field(default=None, description="Max conversation turns")
     max_budget_usd: float | None = Field(default=None, description="Max budget in USD")
     cwd: str | Path | None = Field(default=None, description="Working directory")
     include_partial_messages: bool = Field(
         default=False, description="Enable partial message streaming"
     )
+    api_key: str | None = Field(default=None, description="Anthropic API key")
+    oauth_token: str | None = Field(default=None, description="OAuth token")
 
     _mcp_servers: dict[str, Any] = {}
     _bound_tools: list[BaseTool] = []
-    _sessions: dict[str, ClaudeSDKClient] = {}
     _last_result: ResultMessage | None = None
+    _tool_results_var: contextvars.ContextVar | None = PrivateAttr(
+        default_factory=lambda: contextvars.ContextVar("claude_code_tool_results")
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -79,13 +89,68 @@ class ClaudeCodeChatModel(BaseChatModel):
             "allowed_tools": self.allowed_tools,
         }
 
+    def invoke(
+        self,
+        input: Any,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> AIMessage:
+        """Ensure RunnableConfig is available to downstream calls."""
+        config = ensure_config(config)
+        kwargs.setdefault("_config", config)
+        return super().invoke(input, config=config, stop=stop, **kwargs)
+
+    async def ainvoke(
+        self,
+        input: Any,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> AIMessage:
+        """Async invoke that propagates RunnableConfig via context."""
+        config = ensure_config(config)
+        kwargs.setdefault("_config", config)
+        return await super().ainvoke(input, config=config, stop=stop, **kwargs)
+
+    def stream(
+        self,
+        input: Any,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> Iterator[AIMessageChunk]:
+        """Stream while keeping config in context for session support."""
+        config = ensure_config(config)
+        kwargs.setdefault("_config", config)
+        yield from super().stream(input, config=config, stop=stop, **kwargs)
+
+    async def astream(
+        self,
+        input: Any,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[AIMessageChunk]:
+        """Async stream while propagating config context."""
+        config = ensure_config(config)
+        kwargs.setdefault("_config", config)
+        async for chunk in super().astream(
+            input, config=config, stop=stop, **kwargs
+        ):
+            yield chunk
+
     def _build_options(self, **overrides: Any) -> ClaudeAgentOptions:
         """Build ClaudeAgentOptions from model config."""
         opts = {
             "model": self.model,
             "permission_mode": self.permission_mode,
-            "allowed_tools": list(self.allowed_tools),
-            "disallowed_tools": list(self.disallowed_tools),
+            "allowed_tools": normalize_tools(list(self.allowed_tools)),
+            "disallowed_tools": normalize_tools(list(self.disallowed_tools)),
         }
 
         if self.fallback_model:
@@ -100,16 +165,42 @@ class ClaudeCodeChatModel(BaseChatModel):
             opts["cwd"] = self.cwd
         if self._mcp_servers:
             opts["mcp_servers"] = self._mcp_servers
+
+        env: dict[str, str] = {}
+        if self.api_key:
+            env["ANTHROPIC_API_KEY"] = self.api_key
+        if self.oauth_token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = self.oauth_token
+        if env:
+            opts["env"] = env
+
         if self.include_partial_messages:
             opts["include_partial_messages"] = True
+        # When tools are allowed/bound, ensure partial messages so tool results stream back.
+        if not opts.get("include_partial_messages") and (
+            self._bound_tools or opts.get("allowed_tools")
+        ):
+            opts["include_partial_messages"] = True
 
-        opts.update(overrides)
+        allowed_keys = set(ClaudeAgentOptions.__dataclass_fields__.keys())
+        for key, value in overrides.items():
+            if key.startswith("_"):
+                if key == "_mcp_servers":
+                    opts["mcp_servers"] = value
+                continue
+            if key in allowed_keys:
+                if key in {"allowed_tools", "disallowed_tools"}:
+                    opts[key] = normalize_tools(list(value or []))
+                else:
+                    opts[key] = value
+
         return ClaudeAgentOptions(**opts)
 
     def _convert_messages(
-        self, messages: list[BaseMessage]
+        self,
+        messages: list[BaseMessage],
     ) -> tuple[str, str | None]:
-        """Convert LangChain messages to prompt and system prompt.
+        """Convert LangChain messages to prompt and system prompt. 
         
         Returns:
             Tuple of (prompt, system_prompt)
@@ -141,19 +232,42 @@ class ClaudeCodeChatModel(BaseChatModel):
         return prompt, system_prompt
 
     def _parse_assistant_message(
-        self, message: AssistantMessage
-    ) -> tuple[str, list[dict[str, Any]]]:
+        self,
+        message: AssistantMessage,
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
         """Parse AssistantMessage content blocks.
         
         Returns:
-            Tuple of (text_content, tool_calls)
+            Tuple of (text_content, tool_calls, tool_results)
         """
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
+        tool_results: list[dict[str, Any]] = []
 
         for block in message.content:
             if isinstance(block, TextBlock):
                 text_parts.append(block.text)
+            elif isinstance(block, ToolResultBlock):
+                content_items: list[str] = []
+                if isinstance(block.content, str):
+                    content_items.append(block.content)
+                elif isinstance(block.content, list):
+                    for item in block.content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            content_items.append(str(item.get("text", "")))
+                        else:
+                            content_items.append(str(item))
+
+                if content_items:
+                    text_parts.append("\n".join(content_items))
+
+                tool_results.append(
+                    {
+                        "tool_use_id": getattr(block, "tool_use_id", None),
+                        "content": block.content,
+                        "is_error": block.is_error,
+                    }
+                )
             elif isinstance(block, ToolUseBlock):
                 tool_calls.append({
                     "id": block.id,
@@ -161,7 +275,7 @@ class ClaudeCodeChatModel(BaseChatModel):
                     "args": block.input,
                 })
 
-        return "\n".join(text_parts), tool_calls
+        return "\n".join(text_parts), tool_calls, tool_results
 
     def _create_ai_message(
         self,
@@ -169,12 +283,18 @@ class ClaudeCodeChatModel(BaseChatModel):
         tool_calls: list[dict[str, Any]] | None = None,
         generation_info: dict[str, Any] | None = None,
     ) -> AIMessage:
-        """Create AIMessage with optional tool calls."""
+        """Create AIMessage with optional tool calls.
+        
+        Note: tool_calls are stored in response_metadata, NOT as AIMessage.tool_calls.
+        Claude Code executes tools internally, so exposing tool_calls would cause
+        LangGraph to attempt re-execution of already-completed tool calls.
+        """
         kwargs: dict[str, Any] = {"content": content}
-        if tool_calls:
-            kwargs["tool_calls"] = tool_calls
         if generation_info:
             kwargs["response_metadata"] = generation_info
+        if tool_calls:
+            kwargs.setdefault("response_metadata", {})
+            kwargs["response_metadata"]["internal_tool_calls"] = tool_calls
         return AIMessage(**kwargs)
 
     async def _aquery(
@@ -189,30 +309,35 @@ class ClaudeCodeChatModel(BaseChatModel):
         Returns:
             Tuple of (content, tool_calls, generation_info)
         """
-        session_id = (config or {}).get("configurable", {}).get("session_id")
+        cfg = ensure_config(config) if config is not None else None
+        session_id = kwargs.pop("session_id", None) or kwargs.pop("resume", None)
+        if cfg:
+            session_id = session_id or cfg.get("configurable", {}).get("session_id")
+
         options = self._build_options(**kwargs)
 
-        if session_id and session_id in self._sessions:
+        if session_id:
+            options.resume = session_id
             options.continue_conversation = True
 
         all_text: list[str] = []
         all_tool_calls: list[dict[str, Any]] = []
+        all_tool_results: list[dict[str, Any]] = []
         generation_info: dict[str, Any] = {}
+        tool_results_token = self._tool_results_var.set([])
 
         async with ClaudeSDKClient(options=options) as client:
-            if session_id:
-                self._sessions[session_id] = client
-
             await client.query(prompt)
 
             async for msg in client.receive_response():
                 if isinstance(msg, AssistantMessage):
-                    text, tool_calls = self._parse_assistant_message(msg)
+                    text, tool_calls, tool_results = self._parse_assistant_message(msg)
                     if text:
                         all_text.append(text)
                         if run_manager:
                             await run_manager.on_llm_new_token(text)
                     all_tool_calls.extend(tool_calls)
+                    all_tool_results.extend(tool_results)
 
                 elif isinstance(msg, ResultMessage):
                     self._last_result = msg
@@ -227,6 +352,14 @@ class ClaudeCodeChatModel(BaseChatModel):
                     if msg.usage:
                         generation_info["usage"] = msg.usage
 
+        captured = self._tool_results_var.get()
+        if captured:
+            all_tool_results.extend(captured)
+        self._tool_results_var.reset(tool_results_token)
+
+        if all_tool_results:
+            generation_info["tool_results"] = all_tool_results
+
         return "\n".join(all_text), all_tool_calls, generation_info
 
     def _generate(
@@ -237,9 +370,7 @@ class ClaudeCodeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         """Synchronous generation - runs async in event loop."""
-        return asyncio.get_event_loop().run_until_complete(
-            self._agenerate(messages, stop=stop, run_manager=None, **kwargs)
-        )
+        return self._run_sync(self._agenerate(messages, stop=stop, run_manager=None, **kwargs))
 
     async def _agenerate(
         self,
@@ -249,13 +380,14 @@ class ClaudeCodeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         """Async generation - primary implementation."""
+        config = kwargs.pop("_config", None)
         prompt, system_prompt = self._convert_messages(messages)
 
         if system_prompt and not self.system_prompt:
             kwargs["system_prompt"] = system_prompt
 
         content, tool_calls, generation_info = await self._aquery(
-            prompt, run_manager=run_manager, **kwargs
+            prompt, config=config, run_manager=run_manager, **kwargs
         )
 
         ai_message = self._create_ai_message(content, tool_calls, generation_info)
@@ -276,18 +408,50 @@ class ClaudeCodeChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        """Synchronous streaming."""
-        loop = asyncio.new_event_loop()
+        """Synchronous streaming using background thread to preserve anyio task affinity."""
         try:
-            async_gen = self._astream(messages, stop=stop, run_manager=None, **kwargs)
-            while True:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError(
+                "Cannot use synchronous streaming while an event loop is running. Use 'astream' instead."
+            )
+
+        chunk_queue: queue.Queue[ChatGenerationChunk | BaseException | None] = queue.Queue()
+
+        def run_async_stream() -> None:
+            async def produce() -> None:
                 try:
-                    chunk = loop.run_until_complete(async_gen.__anext__())
-                    yield chunk
-                except StopAsyncIteration:
+                    async for chunk in self._astream(
+                        messages, stop=stop, run_manager=None, **kwargs
+                    ):
+                        chunk_queue.put(chunk)
+                    chunk_queue.put(None)
+                except BaseException as exc:
+                    chunk_queue.put(exc)
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(produce())
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+
+        thread = threading.Thread(target=run_async_stream, daemon=True)
+        thread.start()
+
+        try:
+            while True:
+                item = chunk_queue.get()
+                if item is None:
                     break
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
         finally:
-            loop.close()
+            thread.join(timeout=5.0)
 
     async def _astream(
         self,
@@ -297,22 +461,33 @@ class ClaudeCodeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         """Async streaming - yields chunks as they arrive."""
+        config = kwargs.pop("_config", None)
         prompt, system_prompt = self._convert_messages(messages)
 
         if system_prompt and not self.system_prompt:
             kwargs["system_prompt"] = system_prompt
 
         kwargs["include_partial_messages"] = True
+        cfg = ensure_config(config) if config is not None else None
+        session_id = kwargs.pop("session_id", None) or kwargs.pop("resume", None)
+        if cfg:
+            session_id = session_id or cfg.get("configurable", {}).get("session_id")
+
         options = self._build_options(**kwargs)
 
+        if session_id:
+            options.resume = session_id
+            options.continue_conversation = True
+
         tool_calls_buffer: list[dict[str, Any]] = []
+        tool_results_buffer: list[dict[str, Any]] = []
 
         async with ClaudeSDKClient(options=options) as client:
             await client.query(prompt)
 
             async for msg in client.receive_response():
                 if isinstance(msg, AssistantMessage):
-                    text, tool_calls = self._parse_assistant_message(msg)
+                    text, tool_calls, tool_results = self._parse_assistant_message(msg)
 
                     if text:
                         chunk = ChatGenerationChunk(
@@ -323,26 +498,28 @@ class ClaudeCodeChatModel(BaseChatModel):
                         yield chunk
 
                     tool_calls_buffer.extend(tool_calls)
+                    tool_results_buffer.extend(tool_results)
 
                 elif isinstance(msg, ResultMessage):
                     self._last_result = msg
 
+                    generation_info: dict[str, Any] = {
+                        "total_cost_usd": msg.total_cost_usd,
+                        "duration_ms": msg.duration_ms,
+                        "duration_api_ms": msg.duration_api_ms,
+                        "session_id": msg.session_id,
+                        "finish_reason": "stop" if not msg.is_error else "error",
+                    }
+                    if msg.usage:
+                        generation_info["usage"] = msg.usage
                     if tool_calls_buffer:
-                        yield ChatGenerationChunk(
-                            message=AIMessageChunk(
-                                content="",
-                                tool_calls=tool_calls_buffer,
-                            )
-                        )
+                        generation_info["internal_tool_calls"] = tool_calls_buffer
+                    if tool_results_buffer:
+                        generation_info["internal_tool_results"] = tool_results_buffer
 
                     yield ChatGenerationChunk(
-                        message=AIMessageChunk(content=""),
-                        generation_info={
-                            "total_cost_usd": msg.total_cost_usd,
-                            "duration_ms": msg.duration_ms,
-                            "session_id": msg.session_id,
-                            "finish_reason": "stop" if not msg.is_error else "error",
-                        },
+                        message=AIMessageChunk(content="", chunk_position="last"),
+                        generation_info=generation_info,
                     )
 
     def bind_tools(
@@ -370,21 +547,30 @@ class ClaudeCodeChatModel(BaseChatModel):
 
         allowed = [f"mcp__langchain-tools__{name}" for name in tool_names]
 
-        return self.bind(
-            _mcp_servers={"langchain-tools": server},
-            allowed_tools=list(self.allowed_tools) + allowed,
-            _bound_tools=list(tools),
-            **kwargs,
-        )
+        return self.model_copy(
+            update={
+                "_mcp_servers": {"langchain-tools": server},
+                "allowed_tools": normalize_tools(list(self.allowed_tools)) + allowed,
+                "_bound_tools": list(tools),
+            }
+        ).bind(**kwargs)
 
     def _get_tool_schema(self, tool: BaseTool) -> dict[str, Any]:
         """Extract JSON schema from LangChain tool."""
         if hasattr(tool, "args_schema") and tool.args_schema:
-            return tool.args_schema.model_json_schema()
+            try:
+                return tool.args_schema.model_json_schema()
+            except PydanticInvalidForJsonSchema:
+                # Some tool arg models include callables that cannot be rendered to JSON Schema.
+                return {"type": "object", "properties": {}, "required": []}
+            except Exception:
+                return {"type": "object", "properties": {}, "required": []}
         return {"type": "object", "properties": {}, "required": []}
 
     def _wrap_langchain_tool(
-        self, tool: BaseTool, schema: dict[str, Any]
+        self,
+        tool: BaseTool,
+        schema: dict[str, Any],
     ) -> Callable[..., Any]:
         """Wrap LangChain tool as SDK tool function."""
         props = schema.get("properties", {})
@@ -405,10 +591,21 @@ class ClaudeCodeChatModel(BaseChatModel):
         @sdk_tool(tool.name, tool.description or "", param_types)
         async def wrapped_tool(args: dict[str, Any]) -> dict[str, Any]:
             try:
-                if asyncio.iscoroutinefunction(tool._run):
+                if hasattr(tool, "_arun") and asyncio.iscoroutinefunction(tool._arun):
                     result = await tool._arun(**args)
                 else:
                     result = tool._run(**args)
+
+                captured = self._tool_results_var.get(None) if self._tool_results_var else None
+                if captured is not None:
+                    captured.append(
+                        {
+                            "name": tool.name,
+                            "args": args,
+                            "result": result,
+                        }
+                    )
+
                 return {"content": [{"type": "text", "text": str(result)}]}
             except Exception as e:
                 return {
@@ -418,7 +615,27 @@ class ClaudeCodeChatModel(BaseChatModel):
 
         return wrapped_tool
 
+    def resume_from_thread(self, thread_id: str) -> Runnable:
+        """Return a bound model that resumes the provider session using a LangGraph thread_id."""
+        return self.with_config(config={"configurable": {"session_id": thread_id}})
+
+    def enable_tools(self, tools: list[str | ClaudeTool]) -> Runnable:
+        """Return a new model with the given tools added to the allow list."""
+        merged = normalize_tools(normalize_tools(list(self.allowed_tools)) + list(tools))
+        return self.model_copy(update={"allowed_tools": merged})
+
     @property
     def last_result(self) -> ResultMessage | None:
         """Get the last ResultMessage with cost/usage info."""
         return self._last_result
+
+    def _run_sync(self, coro: asyncio.Future) -> Any:
+        """Run coroutine safely from sync context without relying on global loop."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        raise RuntimeError(
+            "Cannot call synchronous ClaudeCodeChatModel methods while an event loop is running. Use 'ainvoke' instead."
+        )

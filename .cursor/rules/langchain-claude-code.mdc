@@ -1,0 +1,16 @@
+---
+description: Claude Code LangChain wrapper fixes (Dec 2 2025)
+alwaysApply: false
+---
+
+# Claude Code Wrapper Notes
+
+- Pass conversation `session_id` via `configurable.session_id` (or kwargs `session_id`/`resume`); the model now forwards it to `ClaudeAgentOptions.resume` and flips `continue_conversation` so sessions actually resume.
+- In async contexts use `ainvoke`/`astream`; sync helpers raise a clear error when an event loop is running and use `asyncio.run` when none exists (no reliance on deprecated global loops).
+- LangChain tools now prefer `_arun` when available before falling back to `_run`, so async tools stay async.
+- Streaming and non-streaming runs both surface `duration_api_ms`, `usage`, and `session_id` in `generation_info` and update `last_result` consistently.
+- New helper `resume_from_thread(thread_id)` binds `configurable.session_id` so LangGraph `thread_id` can be reused as the provider session id—keeps SDK-side session continuity aligned with LangGraph checkpoints.
+- Tool schema extraction now tolerates non-JSON-schema-friendly arg models (e.g., callables); when schema generation fails we fall back to an empty object schema so binding doesn’t crash agents like DeepAgent.
+- `_build_options` now strips private/unknown kwargs (e.g., `_mcp_servers`, `bogus`) before constructing `ClaudeAgentOptions`, avoiding incompatible kwargs when models are bound in agents.
+- Added typed tool catalog in `claude_code_tools.py` (`ClaudeTool` enum + helpers) and `enable_tools([...])` for building allowlists; `normalize_tools` dedupes enums/strings and all allow/disallow lists pass through it.
+- `bind_tools` is covered by an integration test that ensures MCP server wiring and allowlist entries are set; reminder: every new feature must ship with tests.
