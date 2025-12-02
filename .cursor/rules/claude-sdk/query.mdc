@@ -1,0 +1,108 @@
+---
+description: query() async function for one-shot stateless prompts with ClaudeAgentOptions
+alwaysApply: false
+---
+
+# query() - One-Shot Queries
+
+Use `query()` for simple, stateless interactions where all inputs are known upfront.
+
+## When to Use
+
+✓ Simple one-off questions
+✓ Batch processing of independent prompts
+✓ Code generation or analysis tasks
+✓ Automated scripts and CI/CD pipelines
+✓ Fire-and-forget operations
+
+Use `ClaudeSDKClient` instead for:
+
+- Interactive conversations with follow-ups
+- When you need interrupt capabilities
+- Multi-turn sessions with state
+
+## Basic Usage
+
+```python
+import anyio
+from claude_agent_sdk import query, AssistantMessage, TextBlock
+
+async def main():
+    async for message in query(prompt="What is the capital of France?"):
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    print(block.text)
+
+anyio.run(main)
+```
+
+## With Options
+
+```python
+from claude_agent_sdk import query, ClaudeAgentOptions
+
+options = ClaudeAgentOptions(
+    system_prompt="You are a helpful assistant that explains things simply.",
+    max_turns=1,
+)
+
+async for message in query(
+    prompt="Explain what Python is in one sentence.",
+    options=options
+):
+    # Process messages...
+    pass
+```
+
+## With Tools
+
+```python
+from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage
+
+options = ClaudeAgentOptions(
+    allowed_tools=["Read", "Write", "Bash"],
+    system_prompt="You are a helpful file assistant.",
+)
+
+async for message in query(
+    prompt="Create a file called hello.txt with 'Hello, World!' in it",
+    options=options,
+):
+    if isinstance(message, ResultMessage) and message.total_cost_usd:
+        print(f"Cost: ${message.total_cost_usd:.4f}")
+```
+
+## Working Directory
+
+```python
+from pathlib import Path
+from claude_agent_sdk import query, ClaudeAgentOptions
+
+options = ClaudeAgentOptions(
+    cwd="/path/to/project"  # or Path("/path/to/project")
+)
+
+async for message in query(prompt="List files here", options=options):
+    pass
+```
+
+## Streaming Mode (Unidirectional)
+
+Send multiple prompts as an async iterable. All prompts are sent, then all responses received.
+
+```python
+async def prompts():
+    yield {"type": "user", "message": {"role": "user", "content": "Hello"}}
+    yield {"type": "user", "message": {"role": "user", "content": "How are you?"}}
+
+async for message in query(prompt=prompts()):
+    print(message)
+```
+
+## Key Characteristics
+
+- **Unidirectional**: Send all messages upfront, receive all responses
+- **Stateless**: Each query is independent
+- **Simple**: Fire-and-forget, no connection management
+- **No interrupts**: Cannot send follow-up messages mid-stream

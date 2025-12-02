@@ -1,0 +1,251 @@
+---
+description: can_use_tool callback, PermissionResultAllow/Deny, permission_mode control
+alwaysApply: false
+---
+
+# Permission Callbacks and Modes
+
+Control tool execution through permission modes and custom callbacks.
+
+## Permission Modes
+
+| Mode | Behavior |
+|------|----------|
+| `"default"` | CLI prompts for dangerous tools |
+| `"acceptEdits"` | Auto-accept file edits |
+| `"plan"` | Planning mode |
+| `"bypassPermissions"` | Allow all tools (use with caution) |
+
+```python
+from claude_agent_sdk import ClaudeAgentOptions
+
+options = ClaudeAgentOptions(
+    permission_mode="acceptEdits"
+)
+```
+
+## can_use_tool Callback
+
+Implement custom permission logic with `can_use_tool`:
+
+```python
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
+
+async def my_permission_callback(
+    tool_name: str,
+    input_data: dict,
+    context: ToolPermissionContext
+) -> PermissionResultAllow | PermissionResultDeny:
+    
+    # Allow read operations
+    if tool_name in ["Read", "Glob", "Grep"]:
+        return PermissionResultAllow()
+
+    # Deny dangerous bash commands
+    if tool_name == "Bash":
+        command = input_data.get("command", "")
+        dangerous = ["rm -rf", "sudo", "chmod 777"]
+        for pattern in dangerous:
+            if pattern in command:
+                return PermissionResultDeny(
+                    message=f"Dangerous command: {pattern}"
+                )
+        return PermissionResultAllow()
+
+    # Deny writes to system directories
+    if tool_name in ["Write", "Edit"]:
+        file_path = input_data.get("file_path", "")
+        if file_path.startswith("/etc/") or file_path.startswith("/usr/"):
+            return PermissionResultDeny(
+                message=f"Cannot write to system directory: {file_path}"
+            )
+
+    return PermissionResultAllow()
+
+options = ClaudeAgentOptions(
+    can_use_tool=my_permission_callback,
+    permission_mode="default",
+)
+```
+
+## PermissionResultAllow
+
+```python
+@dataclass
+class PermissionResultAllow:
+    behavior: Literal["allow"] = "allow"
+    updated_input: dict[str, Any] | None = None      # Modify tool input
+    updated_permissions: list[PermissionUpdate] | None = None
+```
+
+Allow and modify input:
+
+```python
+# Redirect file writes to safe directory
+if tool_name == "Write":
+    file_path = input_data.get("file_path", "")
+    if not file_path.startswith("/tmp/"):
+        safe_path = f"/tmp/safe/{file_path.split('/')[-1]}"
+        return PermissionResultAllow(
+            updated_input={**input_data, "file_path": safe_path}
+        )
+```
+
+## PermissionResultDeny
+
+```python
+@dataclass
+class PermissionResultDeny:
+    behavior: Literal["deny"] = "deny"
+    message: str = ""        # Reason for denial
+    interrupt: bool = False  # Stop agent execution
+```
+
+Deny with interrupt:
+
+```python
+if "delete_all" in command:
+    return PermissionResultDeny(
+        message="Destructive operation blocked",
+        interrupt=True  # Stop the agent
+    )
+```
+
+## ToolPermissionContext
+
+```python
+@dataclass
+class ToolPermissionContext:
+    signal: Any | None = None  # Future: abort signal
+    suggestions: list[PermissionUpdate] = field(default_factory=list)
+```
+
+Access permission suggestions from CLI:
+
+```python
+async def my_callback(
+    tool_name: str,
+    input_data: dict,
+    context: ToolPermissionContext
+):
+    # Log suggestions from CLI
+    for suggestion in context.suggestions:
+        print(f"CLI suggests: {suggestion}")
+    
+    return PermissionResultAllow()
+```
+
+## Dynamic Permission Mode
+
+Change mode during conversation:
+
+```python
+async with ClaudeSDKClient() as client:
+    # Start with default (prompts for dangerous tools)
+    await client.query("Analyze the codebase")
+    async for msg in client.receive_response():
+        pass
+
+    # Switch to acceptEdits for implementation
+    await client.set_permission_mode("acceptEdits")
+    await client.query("Implement the fix")
+    async for msg in client.receive_response():
+        pass
+```
+
+## Complete Example
+
+```python
+import json
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+    AssistantMessage,
+    ResultMessage,
+    TextBlock,
+)
+
+tool_log = []
+
+async def permission_callback(
+    tool_name: str,
+    input_data: dict,
+    context: ToolPermissionContext
+) -> PermissionResultAllow | PermissionResultDeny:
+    
+    # Log all tool requests
+    tool_log.append({"tool": tool_name, "input": input_data})
+    print(f"🔧 Tool request: {tool_name}")
+    print(f"   Input: {json.dumps(input_data, indent=2)}")
+
+    # Allow read operations
+    if tool_name in ["Read", "Glob", "Grep"]:
+        print(f"   ✅ Allowed (read-only)")
+        return PermissionResultAllow()
+
+    # Block dangerous bash commands
+    if tool_name == "Bash":
+        command = input_data.get("command", "")
+        for pattern in ["rm -rf", "sudo", "mkfs"]:
+            if pattern in command:
+                print(f"   ❌ Denied: {pattern}")
+                return PermissionResultDeny(message=f"Blocked: {pattern}")
+        print(f"   ✅ Allowed")
+        return PermissionResultAllow()
+
+    # Redirect writes to safe location
+    if tool_name in ["Write", "Edit"]:
+        file_path = input_data.get("file_path", "")
+        if not file_path.startswith("./"):
+            safe_path = f"./output/{file_path.split('/')[-1]}"
+            print(f"   ⚠️  Redirecting to {safe_path}")
+            return PermissionResultAllow(
+                updated_input={**input_data, "file_path": safe_path}
+            )
+
+    return PermissionResultAllow()
+
+async def main():
+    options = ClaudeAgentOptions(
+        can_use_tool=permission_callback,
+        permission_mode="default",
+        cwd="."
+    )
+
+    async with ClaudeSDKClient(options) as client:
+        await client.query("List files and create a hello.py script")
+
+        async for msg in client.receive_response():
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, TextBlock):
+                        print(f"Claude: {block.text}")
+            elif isinstance(msg, ResultMessage):
+                print(f"Done! Cost: ${msg.total_cost_usd:.4f}")
+
+    print(f"\nTools used: {len(tool_log)}")
+```
+
+## Constraint: Streaming Mode Required
+
+`can_use_tool` requires `ClaudeSDKClient` (streaming mode):
+
+```python
+# ✗ WRONG: can_use_tool with query()
+options = ClaudeAgentOptions(can_use_tool=my_callback)
+async for msg in query(prompt="...", options=options):  # Error!
+    pass
+
+# ✓ CORRECT: can_use_tool with ClaudeSDKClient
+async with ClaudeSDKClient(options=options) as client:
+    await client.query("...")
+```

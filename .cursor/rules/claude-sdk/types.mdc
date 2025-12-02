@@ -1,0 +1,209 @@
+---
+description: AssistantMessage, TextBlock, ToolUseBlock, ResultMessage type definitions
+alwaysApply: false
+---
+
+# Message Types and Content Blocks
+
+Pattern match on message types for robust response handling.
+
+## Message Types
+
+| Type | Description |
+|------|-------------|
+| `UserMessage` | User input messages |
+| `AssistantMessage` | Claude's responses |
+| `SystemMessage` | System metadata |
+| `ResultMessage` | Completion info with cost/usage |
+| `StreamEvent` | Partial updates during streaming |
+
+## Content Block Types
+
+| Type | Description |
+|------|-------------|
+| `TextBlock` | Text content (`text` attribute) |
+| `ThinkingBlock` | Thinking content (`thinking`, `signature`) |
+| `ToolUseBlock` | Tool invocation (`id`, `name`, `input`) |
+| `ToolResultBlock` | Tool result (`tool_use_id`, `content`, `is_error`) |
+
+## Basic Message Handling
+
+```python
+from claude_agent_sdk import (
+    AssistantMessage,
+    UserMessage,
+    SystemMessage,
+    ResultMessage,
+    TextBlock,
+    ToolUseBlock,
+    ToolResultBlock,
+)
+
+def display_message(msg):
+    if isinstance(msg, UserMessage):
+        for block in msg.content:
+            if isinstance(block, TextBlock):
+                print(f"User: {block.text}")
+            elif isinstance(block, ToolResultBlock):
+                print(f"Tool Result: {block.content}")
+
+    elif isinstance(msg, AssistantMessage):
+        for block in msg.content:
+            if isinstance(block, TextBlock):
+                print(f"Claude: {block.text}")
+            elif isinstance(block, ToolUseBlock):
+                print(f"Tool Use: {block.name} (id: {block.id})")
+                print(f"  Input: {block.input}")
+
+    elif isinstance(msg, SystemMessage):
+        print(f"System: {msg.subtype}")
+
+    elif isinstance(msg, ResultMessage):
+        print(f"Done! Duration: {msg.duration_ms}ms")
+        if msg.total_cost_usd:
+            print(f"Cost: ${msg.total_cost_usd:.4f}")
+```
+
+## AssistantMessage Structure
+
+```python
+@dataclass
+class AssistantMessage:
+    content: list[ContentBlock]  # TextBlock | ToolUseBlock | ...
+    model: str                    # Model used
+    parent_tool_use_id: str | None
+    error: AssistantMessageError | None
+```
+
+## ResultMessage Structure
+
+```python
+@dataclass
+class ResultMessage:
+    subtype: str
+    duration_ms: int
+    duration_api_ms: int
+    is_error: bool
+    num_turns: int
+    session_id: str
+    total_cost_usd: float | None
+    usage: dict[str, Any] | None
+    result: str | None
+    structured_output: Any
+```
+
+## Extracting Tool Use
+
+```python
+async for msg in client.receive_response():
+    if isinstance(msg, AssistantMessage):
+        for block in msg.content:
+            if isinstance(block, ToolUseBlock):
+                tool_name = block.name
+                tool_input = block.input
+                tool_id = block.id
+                
+                if tool_name == "Bash":
+                    command = tool_input.get("command", "")
+                    print(f"Executing: {command}")
+```
+
+## Tracking Cost
+
+```python
+total_cost = 0.0
+
+async for msg in client.receive_response():
+    if isinstance(msg, ResultMessage):
+        if msg.total_cost_usd:
+            total_cost += msg.total_cost_usd
+            print(f"Turn cost: ${msg.total_cost_usd:.4f}")
+            print(f"Total cost: ${total_cost:.4f}")
+```
+
+## ClaudeAgentOptions Key Fields
+
+```python
+@dataclass
+class ClaudeAgentOptions:
+    allowed_tools: list[str]              # Tools Claude can use
+    system_prompt: str | None             # System prompt
+    mcp_servers: dict[str, McpServerConfig]  # MCP servers
+    permission_mode: PermissionMode       # "default" | "acceptEdits" | "bypassPermissions"
+    max_turns: int | None                 # Limit conversation turns
+    max_budget_usd: float | None          # Cost limit
+    model: str | None                     # Model to use
+    cwd: str | Path | None                # Working directory
+    hooks: dict[HookEvent, list[HookMatcher]]  # Hook configurations
+    agents: dict[str, AgentDefinition]    # Custom agents
+    setting_sources: list[SettingSource]  # "user" | "project" | "local"
+    include_partial_messages: bool        # Stream partial updates
+```
+
+## Permission Modes
+
+```python
+# Default: CLI prompts for dangerous tools
+permission_mode="default"
+
+# Auto-accept file edits
+permission_mode="acceptEdits"
+
+# Allow all tools (use with caution)
+permission_mode="bypassPermissions"
+```
+
+## Error Types
+
+```python
+from claude_agent_sdk import (
+    ClaudeSDKError,      # Base error
+    CLINotFoundError,    # Claude Code not installed
+    CLIConnectionError,  # Connection issues
+    ProcessError,        # Process failed
+    CLIJSONDecodeError,  # JSON parsing issues
+)
+
+try:
+    async for message in query(prompt="Hello"):
+        pass
+except CLINotFoundError:
+    print("Install Claude Code first")
+except ProcessError as e:
+    print(f"Process failed: exit code {e.exit_code}")
+except CLIJSONDecodeError as e:
+    print(f"Failed to parse: {e}")
+```
+
+## Imports Pattern
+
+```python
+from claude_agent_sdk import (
+    # APIs
+    query,
+    ClaudeSDKClient,
+    ClaudeAgentOptions,
+    # Messages
+    AssistantMessage,
+    UserMessage,
+    SystemMessage,
+    ResultMessage,
+    # Content
+    TextBlock,
+    ToolUseBlock,
+    ToolResultBlock,
+    ThinkingBlock,
+)
+
+from claude_agent_sdk.types import (
+    # Hooks
+    HookInput,
+    HookContext,
+    HookJSONOutput,
+    HookMatcher,
+    # Permissions
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
+```

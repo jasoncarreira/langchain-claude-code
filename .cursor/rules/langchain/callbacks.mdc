@@ -1,0 +1,137 @@
+---
+description: AsyncCallbackHandler for on_chain_start, on_llm_end, on_tool_start events
+alwaysApply: false
+---
+
+# LangChain Callback Handlers
+
+## Overview
+
+Callbacks enable observability, logging, and custom behavior during LLM execution. Implement `AsyncCallbackHandler` for tracing chains, tools, and chat model events.
+
+## AsyncCallbackHandler Implementation
+
+```python
+from typing import Any
+from uuid import UUID
+import logging
+from langchain_core.callbacks import AsyncCallbackHandler
+from langchain_core.messages import BaseMessage
+from langchain_core.outputs import LLMResult
+
+logger = logging.getLogger(__name__)
+
+class CustomAsyncHandler(AsyncCallbackHandler):
+    async def on_chain_start(self, serialized, inputs, **kwargs):
+        logger.info(
+            f"Chain started: {kwargs.get('name')}, "
+            f"run_id: {kwargs.get('run_id')}"
+        )
+
+    async def on_chain_end(self, outputs, **kwargs):
+        logger.info(f"Chain ended: run_id {kwargs.get('run_id')}")
+
+    async def on_chain_error(self, error, **kwargs):
+        logger.error(f"Chain error: {error}")
+
+    async def on_chat_model_start(
+        self,
+        serialized: dict[str, Any],
+        messages: list[list[BaseMessage]],
+        **kwargs
+    ):
+        model_name = kwargs.get('metadata', {}).get('ls_model_name', 'unknown')
+        logger.info(f"Chat model started: {model_name}")
+        logger.info(f"Input: {messages[0][-1].content[:100]}...")
+
+    async def on_llm_end(self, response: LLMResult, **kwargs):
+        logger.info(f"LLM ended: run_id {kwargs.get('run_id')}")
+        if response.generations:
+            content = response.generations[0][0].message.content
+            logger.info(f"Output: {content[:100]}...")
+
+    async def on_llm_error(self, error, **kwargs):
+        logger.error(f"LLM error: {error}")
+
+    async def on_tool_start(self, serialized: dict[str, Any], input_str: str, **kwargs):
+        logger.info(f"Tool {serialized.get('name')} started with input: {input_str}")
+
+    async def on_tool_end(self, output: str, **kwargs):
+        logger.info(f"Tool {kwargs.get('name')} completed: {output[:100]}...")
+
+    async def on_tool_error(self, error, **kwargs):
+        logger.error(f"Tool error: {error}")
+```
+
+## Registering Callbacks
+
+```python
+from langchain_core.callbacks import CallbackManager
+
+callback_manager = CallbackManager([CustomAsyncHandler()])
+
+result = await model.ainvoke(
+    messages,
+    config={"callbacks": [CustomAsyncHandler()]}
+)
+```
+
+## LangGraph Callback Integration
+
+```python
+from langgraph.graph import StateGraph
+
+graph = StateGraph(state_schema=MyState)
+
+result = await graph.compile().ainvoke(
+    {"messages": [HumanMessage(content="Hello")]},
+    config={"callbacks": [CustomAsyncHandler()]}
+)
+```
+
+## Context-Aware Callbacks
+
+```python
+class ContextAwareHandler(AsyncCallbackHandler):
+    def __init__(self, context: dict = None):
+        super().__init__()
+        self.context = context or {}
+
+    async def on_chain_start(self, serialized, inputs, **kwargs):
+        logger.info(
+            f"Chain: {kwargs.get('name')}, "
+            f"conversation_id: {self.context.get('conversation_id')}"
+        )
+```
+
+## Run ID Normalization
+
+```python
+def _normalize_ids(self, run_id=None, parent_run_id=None):
+    if isinstance(run_id, UUID):
+        run_id = str(run_id)
+    if isinstance(parent_run_id, UUID):
+        parent_run_id = str(parent_run_id)
+    return run_id, parent_run_id
+```
+
+## Callback kwargs Reference
+
+| Event | Key kwargs |
+|-------|------------|
+| `on_chain_start` | `name`, `run_id`, `parent_run_id` |
+| `on_chat_model_start` | `metadata`, `run_id`, `parent_run_id` |
+| `on_llm_end` | `run_id`, `parent_run_id` |
+| `on_tool_start` | `run_id`, `parent_run_id` |
+| `on_tool_end` | `name`, `run_id` |
+
+## When to Apply
+
+- Building observability/monitoring systems
+- Custom logging for LLM applications
+- Debugging chain execution
+- Tracking tool usage patterns
+
+## See Also
+
+- [Custom Chat Model](mdc:langchain/custom-chat-model.mdc)

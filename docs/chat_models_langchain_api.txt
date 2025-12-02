@@ -1,0 +1,4779 @@
+# langchain
+
+## Metadata
+NUMBER OF FILES: 8
+TOKEN COUNT (APPROX.): 43030
+FILE EXTENSIONS: py
+BIGGEST FILE: libs/core/langchain_core/language_models/chat_models.py (71677 bytes)
+
+## TREE VIEW
+langchain
+└── libs
+    └── core
+        └── langchain_core
+            └── language_models
+                ├── __init__.py
+                ├── _utils.py
+                ├── base.py
+                ├── chat_models.py
+                ├── fake.py
+                ├── fake_chat_models.py
+                ├── llms.py
+                └── model_profile.py
+
+## CONTENTS
+### libs/core/langchain_core/language_models/__init__.py
+
+"""Language models.
+
+LangChain has two main classes to work with language models: chat models and
+"old-fashioned" LLMs.
+
+**Chat models**
+
+Language models that use a sequence of messages as inputs and return chat messages
+as outputs (as opposed to using plain text).
+
+Chat models support the assignment of distinct roles to conversation messages, helping
+to distinguish messages from the AI, users, and instructions such as system messages.
+
+The key abstraction for chat models is `BaseChatModel`. Implementations should inherit
+from this class.
+
+See existing [chat model integrations](https://docs.langchain.com/oss/python/integrations/chat).
+
+**LLMs**
+
+Language models that takes a string as input and returns a string.
+These are traditionally older models (newer models generally are chat models).
+
+Although the underlying models are string in, string out, the LangChain wrappers also
+allow these models to take messages as input. This gives them the same interface as
+chat models. When messages are passed in as input, they will be formatted into a string
+under the hood before being passed to the underlying model.
+"""
+
+from typing import TYPE_CHECKING
+
+from langchain_core._import_utils import import_attr
+from langchain_core.language_models._utils import is_openai_data_block
+
+if TYPE_CHECKING:
+    from langchain_core.language_models.base import (
+        BaseLanguageModel,
+        LangSmithParams,
+        LanguageModelInput,
+        LanguageModelLike,
+        LanguageModelOutput,
+        get_tokenizer,
+    )
+    from langchain_core.language_models.chat_models import (
+        BaseChatModel,
+        SimpleChatModel,
+    )
+    from langchain_core.language_models.fake import FakeListLLM, FakeStreamingListLLM
+    from langchain_core.language_models.fake_chat_models import (
+        FakeListChatModel,
+        FakeMessagesListChatModel,
+        GenericFakeChatModel,
+        ParrotFakeChatModel,
+    )
+    from langchain_core.language_models.llms import LLM, BaseLLM
+    from langchain_core.language_models.model_profile import (
+        ModelProfile,
+        ModelProfileRegistry,
+    )
+
+__all__ = (
+    "LLM",
+    "BaseChatModel",
+    "BaseLLM",
+    "BaseLanguageModel",
+    "FakeListChatModel",
+    "FakeListLLM",
+    "FakeMessagesListChatModel",
+    "FakeStreamingListLLM",
+    "GenericFakeChatModel",
+    "LangSmithParams",
+    "LanguageModelInput",
+    "LanguageModelLike",
+    "LanguageModelOutput",
+    "ModelProfile",
+    "ModelProfileRegistry",
+    "ParrotFakeChatModel",
+    "SimpleChatModel",
+    "get_tokenizer",
+    "is_openai_data_block",
+)
+
+_dynamic_imports = {
+    "BaseLanguageModel": "base",
+    "LangSmithParams": "base",
+    "LanguageModelInput": "base",
+    "LanguageModelLike": "base",
+    "LanguageModelOutput": "base",
+    "get_tokenizer": "base",
+    "BaseChatModel": "chat_models",
+    "SimpleChatModel": "chat_models",
+    "FakeListLLM": "fake",
+    "FakeStreamingListLLM": "fake",
+    "FakeListChatModel": "fake_chat_models",
+    "FakeMessagesListChatModel": "fake_chat_models",
+    "GenericFakeChatModel": "fake_chat_models",
+    "ParrotFakeChatModel": "fake_chat_models",
+    "LLM": "llms",
+    "ModelProfile": "model_profile",
+    "ModelProfileRegistry": "model_profile",
+    "BaseLLM": "llms",
+    "is_openai_data_block": "_utils",
+}
+
+
+def __getattr__(attr_name: str) -> object:
+    module_name = _dynamic_imports.get(attr_name)
+    result = import_attr(attr_name, module_name, __spec__.parent)
+    globals()[attr_name] = result
+    return result
+
+
+def __dir__() -> list[str]:
+    return list(__all__)
+
+
+---
+### libs/core/langchain_core/language_models/_utils.py
+
+import re
+from collections.abc import Sequence
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    TypedDict,
+    TypeVar,
+)
+
+if TYPE_CHECKING:
+    from langchain_core.messages import BaseMessage
+from langchain_core.messages.content import (
+    ContentBlock,
+)
+
+
+def is_openai_data_block(
+    block: dict, filter_: Literal["image", "audio", "file"] | None = None
+) -> bool:
+    """Check whether a block contains multimodal data in OpenAI Chat Completions format.
+
+    Supports both data and ID-style blocks (e.g. `'file_data'` and `'file_id'`)
+
+    If additional keys are present, they are ignored / will not affect outcome as long
+    as the required keys are present and valid.
+
+    Args:
+        block: The content block to check.
+        filter_: If provided, only return True for blocks matching this specific type.
+            - "image": Only match image_url blocks
+            - "audio": Only match input_audio blocks
+            - "file": Only match file blocks
+            If `None`, match any valid OpenAI data block type. Note that this means that
+            if the block has a valid OpenAI data type but the filter_ is set to a
+            different type, this function will return False.
+
+    Returns:
+        `True` if the block is a valid OpenAI data block and matches the filter_
+        (if provided).
+
+    """
+    if block.get("type") == "image_url":
+        if filter_ is not None and filter_ != "image":
+            return False
+        if (
+            (set(block.keys()) <= {"type", "image_url", "detail"})
+            and (image_url := block.get("image_url"))
+            and isinstance(image_url, dict)
+        ):
+            url = image_url.get("url")
+            if isinstance(url, str):
+                # Required per OpenAI spec
+                return True
+            # Ignore `'detail'` since it's optional and specific to OpenAI
+
+    elif block.get("type") == "input_audio":
+        if filter_ is not None and filter_ != "audio":
+            return False
+        if (audio := block.get("input_audio")) and isinstance(audio, dict):
+            audio_data = audio.get("data")
+            audio_format = audio.get("format")
+            # Both required per OpenAI spec
+            if isinstance(audio_data, str) and isinstance(audio_format, str):
+                return True
+
+    elif block.get("type") == "file":
+        if filter_ is not None and filter_ != "file":
+            return False
+        if (file := block.get("file")) and isinstance(file, dict):
+            file_data = file.get("file_data")
+            file_id = file.get("file_id")
+            # Files can be either base64-encoded or pre-uploaded with an ID
+            if isinstance(file_data, str) or isinstance(file_id, str):
+                return True
+
+    else:
+        return False
+
+    # Has no `'type'` key
+    return False
+
+
+class ParsedDataUri(TypedDict):
+    source_type: Literal["base64"]
+    data: str
+    mime_type: str
+
+
+def _parse_data_uri(uri: str) -> ParsedDataUri | None:
+    """Parse a data URI into its components.
+
+    If parsing fails, return `None`. If either MIME type or data is missing, return
+    `None`.
+
+    Example:
+        ```python
+        data_uri = "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
+        parsed = _parse_data_uri(data_uri)
+
+        assert parsed == {
+            "source_type": "base64",
+            "mime_type": "image/jpeg",
+            "data": "/9j/4AAQSkZJRg...",
+        }
+        ```
+    """
+    regex = r"^data:(?P<mime_type>[^;]+);base64,(?P<data>.+)$"
+    match = re.match(regex, uri)
+    if match is None:
+        return None
+
+    mime_type = match.group("mime_type")
+    data = match.group("data")
+    if not mime_type or not data:
+        return None
+
+    return {
+        "source_type": "base64",
+        "data": data,
+        "mime_type": mime_type,
+    }
+
+
+def _normalize_messages(
+    messages: Sequence["BaseMessage"],
+) -> list["BaseMessage"]:
+    """Normalize message formats to LangChain v1 standard content blocks.
+
+    Chat models already implement support for:
+    - Images in OpenAI Chat Completions format
+        These will be passed through unchanged
+    - LangChain v1 standard content blocks
+
+    This function extends support to:
+    - `[Audio](https://platform.openai.com/docs/api-reference/chat/create) and
+        `[file](https://platform.openai.com/docs/api-reference/files) data in OpenAI
+        Chat Completions format
+        - Images are technically supported but we expect chat models to handle them
+            directly; this may change in the future
+    - LangChain v0 standard content blocks for backward compatibility
+
+    !!! warning "Behavior changed in `langchain-core` 1.0.0"
+
+        In previous versions, this function returned messages in LangChain v0 format.
+        Now, it returns messages in LangChain v1 format, which upgraded chat models now
+        expect to receive when passing back in message history. For backward
+        compatibility, this function will convert v0 message content to v1 format.
+
+    ??? note "v0 Content Block Schemas"
+
+        `URLContentBlock`:
+
+        ```python
+        {
+            mime_type: NotRequired[str]
+            type: Literal['image', 'audio', 'file'],
+            source_type: Literal['url'],
+            url: str,
+        }
+        ```
+
+        `Base64ContentBlock`:
+
+        ```python
+        {
+            mime_type: NotRequired[str]
+            type: Literal['image', 'audio', 'file'],
+            source_type: Literal['base64'],
+            data: str,
+        }
+        ```
+
+        `IDContentBlock`:
+
+        (In practice, this was never used)
+
+        ```python
+        {
+            type: Literal["image", "audio", "file"],
+            source_type: Literal["id"],
+            id: str,
+        }
+        ```
+
+        `PlainTextContentBlock`:
+
+        ```python
+        {
+            mime_type: NotRequired[str]
+            type: Literal['file'],
+            source_type: Literal['text'],
+            url: str,
+        }
+        ```
+
+    If a v1 message is passed in, it will be returned as-is, meaning it is safe to
+    always pass in v1 messages to this function for assurance.
+
+    For posterity, here are the OpenAI Chat Completions schemas we expect:
+
+    Chat Completions image. Can be URL-based or base64-encoded. Supports MIME types
+    png, jpeg/jpg, webp, static gif:
+    {
+        "type": Literal['image_url'],
+        "image_url": {
+            "url": Union["data:$MIME_TYPE;base64,$BASE64_ENCODED_IMAGE", "$IMAGE_URL"],
+            "detail": Literal['low', 'high', 'auto'] = 'auto',  # Supported by OpenAI
+        }
+    }
+
+    Chat Completions audio:
+    {
+        "type": Literal['input_audio'],
+        "input_audio": {
+            "format": Literal['wav', 'mp3'],
+            "data": str = "$BASE64_ENCODED_AUDIO",
+        },
+    }
+
+    Chat Completions files: either base64 or pre-uploaded file ID
+    {
+        "type": Literal['file'],
+        "file": Union[
+            {
+                "filename": str | None = "$FILENAME",
+                "file_data": str = "$BASE64_ENCODED_FILE",
+            },
+            {
+                "file_id": str = "$FILE_ID",  # For pre-uploaded files to OpenAI
+            },
+        ],
+    }
+
+    """
+    from langchain_core.messages.block_translators.langchain_v0 import (  # noqa: PLC0415
+        _convert_legacy_v0_content_block_to_v1,
+    )
+    from langchain_core.messages.block_translators.openai import (  # noqa: PLC0415
+        _convert_openai_format_to_data_block,
+    )
+
+    formatted_messages = []
+    for message in messages:
+        # We preserve input messages - the caller may reuse them elsewhere and expects
+        # them to remain unchanged. We only create a copy if we need to translate.
+        formatted_message = message
+
+        if isinstance(message.content, list):
+            for idx, block in enumerate(message.content):
+                # OpenAI Chat Completions multimodal data blocks to v1 standard
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") in {"input_audio", "file"}
+                    # Discriminate between OpenAI/LC format since they share `'type'`
+                    and is_openai_data_block(block)
+                ):
+                    formatted_message = _ensure_message_copy(message, formatted_message)
+
+                    converted_block = _convert_openai_format_to_data_block(block)
+                    _update_content_block(formatted_message, idx, converted_block)
+
+                # Convert multimodal LangChain v0 to v1 standard content blocks
+                elif (
+                    isinstance(block, dict)
+                    and block.get("type")
+                    in {
+                        "image",
+                        "audio",
+                        "file",
+                    }
+                    and block.get("source_type")  # v1 doesn't have `source_type`
+                    in {
+                        "url",
+                        "base64",
+                        "id",
+                        "text",
+                    }
+                ):
+                    formatted_message = _ensure_message_copy(message, formatted_message)
+
+                    converted_block = _convert_legacy_v0_content_block_to_v1(block)
+                    _update_content_block(formatted_message, idx, converted_block)
+                    continue
+
+                # else, pass through blocks that look like they have v1 format unchanged
+
+        formatted_messages.append(formatted_message)
+
+    return formatted_messages
+
+
+T = TypeVar("T", bound="BaseMessage")
+
+
+def _ensure_message_copy(message: T, formatted_message: T) -> T:
+    """Create a copy of the message if it hasn't been copied yet."""
+    if formatted_message is message:
+        formatted_message = message.model_copy()
+        # Shallow-copy content list to allow modifications
+        formatted_message.content = list(formatted_message.content)
+    return formatted_message
+
+
+def _update_content_block(
+    formatted_message: "BaseMessage", idx: int, new_block: ContentBlock | dict
+) -> None:
+    """Update a content block at the given index, handling type issues."""
+    # Type ignore needed because:
+    # - `BaseMessage.content` is typed as `Union[str, list[Union[str, dict]]]`
+    # - When content is str, indexing fails (index error)
+    # - When content is list, the items are `Union[str, dict]` but we're assigning
+    #   `Union[ContentBlock, dict]` where ContentBlock is richer than dict
+    # - This is safe because we only call this when we've verified content is a list and
+    #   we're doing content block conversions
+    formatted_message.content[idx] = new_block  # type: ignore[index, assignment]
+
+
+def _update_message_content_to_blocks(message: T, output_version: str) -> T:
+    return message.model_copy(
+        update={
+            "content": message.content_blocks,
+            "response_metadata": {
+                **message.response_metadata,
+                "output_version": output_version,
+            },
+        }
+    )
+
+
+---
+### libs/core/langchain_core/language_models/base.py
+
+"""Base language models class."""
+
+from __future__ import annotations
+
+import warnings
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, Sequence
+from functools import cache
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    TypeAlias,
+    TypeVar,
+)
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing_extensions import TypedDict, override
+
+from langchain_core.caches import BaseCache
+from langchain_core.callbacks import Callbacks
+from langchain_core.globals import get_verbose
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    MessageLikeRepresentation,
+    get_buffer_string,
+)
+from langchain_core.prompt_values import (
+    ChatPromptValueConcrete,
+    PromptValue,
+    StringPromptValue,
+)
+from langchain_core.runnables import Runnable, RunnableSerializable
+
+if TYPE_CHECKING:
+    from langchain_core.outputs import LLMResult
+
+try:
+    from transformers import GPT2TokenizerFast  # type: ignore[import-not-found]
+
+    _HAS_TRANSFORMERS = True
+except ImportError:
+    _HAS_TRANSFORMERS = False
+
+
+class LangSmithParams(TypedDict, total=False):
+    """LangSmith parameters for tracing."""
+
+    ls_provider: str
+    """Provider of the model."""
+    ls_model_name: str
+    """Name of the model."""
+    ls_model_type: Literal["chat", "llm"]
+    """Type of the model. Should be 'chat' or 'llm'."""
+    ls_temperature: float | None
+    """Temperature for generation."""
+    ls_max_tokens: int | None
+    """Max tokens for generation."""
+    ls_stop: list[str] | None
+    """Stop words for generation."""
+
+
+@cache  # Cache the tokenizer
+def get_tokenizer() -> Any:
+    """Get a GPT-2 tokenizer instance.
+
+    This function is cached to avoid re-loading the tokenizer every time it is called.
+
+    Raises:
+        ImportError: If the transformers package is not installed.
+
+    Returns:
+        The GPT-2 tokenizer instance.
+
+    """
+    if not _HAS_TRANSFORMERS:
+        msg = (
+            "Could not import transformers python package. "
+            "This is needed in order to calculate get_token_ids. "
+            "Please install it with `pip install transformers`."
+        )
+        raise ImportError(msg)
+    # create a GPT-2 tokenizer instance
+    return GPT2TokenizerFast.from_pretrained("gpt2")
+
+
+def _get_token_ids_default_method(text: str) -> list[int]:
+    """Encode the text into token IDs."""
+    # get the cached tokenizer
+    tokenizer = get_tokenizer()
+
+    # tokenize the text using the GPT-2 tokenizer
+    return tokenizer.encode(text)
+
+
+LanguageModelInput = PromptValue | str | Sequence[MessageLikeRepresentation]
+"""Input to a language model."""
+
+LanguageModelOutput = BaseMessage | str
+"""Output from a language model."""
+
+LanguageModelLike = Runnable[LanguageModelInput, LanguageModelOutput]
+"""Input/output interface for a language model."""
+
+LanguageModelOutputVar = TypeVar("LanguageModelOutputVar", AIMessage, str)
+"""Type variable for the output of a language model."""
+
+
+def _get_verbosity() -> bool:
+    return get_verbose()
+
+
+class BaseLanguageModel(
+    RunnableSerializable[LanguageModelInput, LanguageModelOutputVar], ABC
+):
+    """Abstract base class for interfacing with language models.
+
+    All language model wrappers inherited from `BaseLanguageModel`.
+
+    """
+
+    cache: BaseCache | bool | None = Field(default=None, exclude=True)
+    """Whether to cache the response.
+
+    * If `True`, will use the global cache.
+    * If `False`, will not use a cache
+    * If `None`, will use the global cache if it's set, otherwise no cache.
+    * If instance of `BaseCache`, will use the provided cache.
+
+    Caching is not currently supported for streaming methods of models.
+    """
+
+    verbose: bool = Field(default_factory=_get_verbosity, exclude=True, repr=False)
+    """Whether to print out response text."""
+
+    callbacks: Callbacks = Field(default=None, exclude=True)
+    """Callbacks to add to the run trace."""
+
+    tags: list[str] | None = Field(default=None, exclude=True)
+    """Tags to add to the run trace."""
+
+    metadata: dict[str, Any] | None = Field(default=None, exclude=True)
+    """Metadata to add to the run trace."""
+
+    custom_get_token_ids: Callable[[str], list[int]] | None = Field(
+        default=None, exclude=True
+    )
+    """Optional encoder to use for counting tokens."""
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
+
+    @field_validator("verbose", mode="before")
+    def set_verbose(cls, verbose: bool | None) -> bool:  # noqa: FBT001
+        """If verbose is `None`, set it.
+
+        This allows users to pass in `None` as verbose to access the global setting.
+
+        Args:
+            verbose: The verbosity setting to use.
+
+        Returns:
+            The verbosity setting to use.
+
+        """
+        if verbose is None:
+            return _get_verbosity()
+        return verbose
+
+    @property
+    @override
+    def InputType(self) -> TypeAlias:
+        """Get the input type for this `Runnable`."""
+        # This is a version of LanguageModelInput which replaces the abstract
+        # base class BaseMessage with a union of its subclasses, which makes
+        # for a much better schema.
+        return str | StringPromptValue | ChatPromptValueConcrete | list[AnyMessage]
+
+    @abstractmethod
+    def generate_prompt(
+        self,
+        prompts: list[PromptValue],
+        stop: list[str] | None = None,
+        callbacks: Callbacks = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Pass a sequence of prompts to the model and return model generations.
+
+        This method should make use of batched calls for models that expose a batched
+        API.
+
+        Use this method when you want to:
+
+        1. Take advantage of batched calls,
+        2. Need more output from the model than just the top generated value,
+        3. Are building chains that are agnostic to the underlying language model
+            type (e.g., pure text completion models vs chat models).
+
+        Args:
+            prompts: List of `PromptValue` objects.
+
+                A `PromptValue` is an object that can be converted to match the format
+                of any language model (string for pure text generation models and
+                `BaseMessage` objects for chat models).
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+            callbacks: `Callbacks` to pass through.
+
+                Used for executing additional functionality, such as logging or
+                streaming, throughout generation.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Returns:
+            An `LLMResult`, which contains a list of candidate `Generation` objects for
+                each input prompt and additional model provider-specific output.
+
+        """
+
+    @abstractmethod
+    async def agenerate_prompt(
+        self,
+        prompts: list[PromptValue],
+        stop: list[str] | None = None,
+        callbacks: Callbacks = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Asynchronously pass a sequence of prompts and return model generations.
+
+        This method should make use of batched calls for models that expose a batched
+        API.
+
+        Use this method when you want to:
+
+        1. Take advantage of batched calls,
+        2. Need more output from the model than just the top generated value,
+        3. Are building chains that are agnostic to the underlying language model
+            type (e.g., pure text completion models vs chat models).
+
+        Args:
+            prompts: List of `PromptValue` objects.
+
+                A `PromptValue` is an object that can be converted to match the format
+                of any language model (string for pure text generation models and
+                `BaseMessage` objects for chat models).
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+            callbacks: `Callbacks` to pass through.
+
+                Used for executing additional functionality, such as logging or
+                streaming, throughout generation.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Returns:
+            An `LLMResult`, which contains a list of candidate `Generation` objects for
+                each input prompt and additional model provider-specific output.
+
+        """
+
+    def with_structured_output(
+        self, schema: dict | type, **kwargs: Any
+    ) -> Runnable[LanguageModelInput, dict | BaseModel]:
+        """Not implemented on this class."""
+        # Implement this on child class if there is a way of steering the model to
+        # generate responses that match a given schema.
+        raise NotImplementedError
+
+    @property
+    def _identifying_params(self) -> Mapping[str, Any]:
+        """Get the identifying parameters."""
+        return self.lc_attributes
+
+    def get_token_ids(self, text: str) -> list[int]:
+        """Return the ordered IDs of the tokens in a text.
+
+        Args:
+            text: The string input to tokenize.
+
+        Returns:
+            A list of IDs corresponding to the tokens in the text, in order they occur
+                in the text.
+        """
+        if self.custom_get_token_ids is not None:
+            return self.custom_get_token_ids(text)
+        return _get_token_ids_default_method(text)
+
+    def get_num_tokens(self, text: str) -> int:
+        """Get the number of tokens present in the text.
+
+        Useful for checking if an input fits in a model's context window.
+
+        This should be overridden by model-specific implementations to provide accurate
+        token counts via model-specific tokenizers.
+
+        Args:
+            text: The string input to tokenize.
+
+        Returns:
+            The integer number of tokens in the text.
+
+        """
+        return len(self.get_token_ids(text))
+
+    def get_num_tokens_from_messages(
+        self,
+        messages: list[BaseMessage],
+        tools: Sequence | None = None,
+    ) -> int:
+        """Get the number of tokens in the messages.
+
+        Useful for checking if an input fits in a model's context window.
+
+        This should be overridden by model-specific implementations to provide accurate
+        token counts via model-specific tokenizers.
+
+        !!! note
+
+            * The base implementation of `get_num_tokens_from_messages` ignores tool
+                schemas.
+            * The base implementation of `get_num_tokens_from_messages` adds additional
+                prefixes to messages in represent user roles, which will add to the
+                overall token count. Model-specific implementations may choose to
+                handle this differently.
+
+        Args:
+            messages: The message inputs to tokenize.
+            tools: If provided, sequence of dict, `BaseModel`, function, or
+                `BaseTool` objects to be converted to tool schemas.
+
+        Returns:
+            The sum of the number of tokens across the messages.
+
+        """
+        if tools is not None:
+            warnings.warn(
+                "Counting tokens in tool schemas is not yet supported. Ignoring tools.",
+                stacklevel=2,
+            )
+        return sum(self.get_num_tokens(get_buffer_string([m])) for m in messages)
+
+
+---
+### libs/core/langchain_core/language_models/chat_models.py
+
+"""Chat models for conversational AI."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import typing
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from functools import cached_property
+from operator import itemgetter
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+from pydantic import BaseModel, ConfigDict, Field
+from typing_extensions import override
+
+from langchain_core.caches import BaseCache
+from langchain_core.callbacks import (
+    AsyncCallbackManager,
+    AsyncCallbackManagerForLLMRun,
+    CallbackManager,
+    CallbackManagerForLLMRun,
+    Callbacks,
+)
+from langchain_core.globals import get_llm_cache
+from langchain_core.language_models._utils import (
+    _normalize_messages,
+    _update_message_content_to_blocks,
+)
+from langchain_core.language_models.base import (
+    BaseLanguageModel,
+    LangSmithParams,
+    LanguageModelInput,
+)
+from langchain_core.language_models.model_profile import ModelProfile
+from langchain_core.load import dumpd, dumps
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    AnyMessage,
+    BaseMessage,
+    convert_to_messages,
+    is_data_content_block,
+    message_chunk_to_message,
+)
+from langchain_core.messages import content as types
+from langchain_core.messages.block_translators.openai import (
+    convert_to_openai_image_block,
+)
+from langchain_core.output_parsers.openai_tools import (
+    JsonOutputKeyToolsParser,
+    PydanticToolsParser,
+)
+from langchain_core.outputs import (
+    ChatGeneration,
+    ChatGenerationChunk,
+    ChatResult,
+    Generation,
+    LLMResult,
+    RunInfo,
+)
+from langchain_core.outputs.chat_generation import merge_chat_generation_chunks
+from langchain_core.prompt_values import ChatPromptValue, PromptValue, StringPromptValue
+from langchain_core.rate_limiters import BaseRateLimiter
+from langchain_core.runnables import RunnableMap, RunnablePassthrough
+from langchain_core.runnables.config import ensure_config, run_in_executor
+from langchain_core.tracers._streaming import _StreamingCallbackHandler
+from langchain_core.utils.function_calling import (
+    convert_to_json_schema,
+    convert_to_openai_tool,
+)
+from langchain_core.utils.pydantic import TypeBaseModel, is_basemodel_subclass
+from langchain_core.utils.utils import LC_ID_PREFIX, from_env
+
+if TYPE_CHECKING:
+    import uuid
+
+    from langchain_core.output_parsers.base import OutputParserLike
+    from langchain_core.runnables import Runnable, RunnableConfig
+    from langchain_core.tools import BaseTool
+
+
+def _generate_response_from_error(error: BaseException) -> list[ChatGeneration]:
+    if hasattr(error, "response"):
+        response = error.response
+        metadata: dict = {}
+        if hasattr(response, "json"):
+            try:
+                metadata["body"] = response.json()
+            except Exception:
+                try:
+                    metadata["body"] = getattr(response, "text", None)
+                except Exception:
+                    metadata["body"] = None
+        if hasattr(response, "headers"):
+            try:
+                metadata["headers"] = dict(response.headers)
+            except Exception:
+                metadata["headers"] = None
+        if hasattr(response, "status_code"):
+            metadata["status_code"] = response.status_code
+        if hasattr(error, "request_id"):
+            metadata["request_id"] = error.request_id
+        generations = [
+            ChatGeneration(message=AIMessage(content="", response_metadata=metadata))
+        ]
+    else:
+        generations = []
+
+    return generations
+
+
+def _format_for_tracing(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Format messages for tracing in `on_chat_model_start`.
+
+    - Update image content blocks to OpenAI Chat Completions format (backward
+    compatibility).
+    - Add `type` key to content blocks that have a single key.
+
+    Args:
+        messages: List of messages to format.
+
+    Returns:
+        List of messages formatted for tracing.
+
+    """
+    messages_to_trace = []
+    for message in messages:
+        message_to_trace = message
+        if isinstance(message.content, list):
+            for idx, block in enumerate(message.content):
+                if isinstance(block, dict):
+                    # Update image content blocks to OpenAI # Chat Completions format.
+                    if (
+                        block.get("type") == "image"
+                        and is_data_content_block(block)
+                        and not ("file_id" in block or block.get("source_type") == "id")
+                    ):
+                        if message_to_trace is message:
+                            # Shallow copy
+                            message_to_trace = message.model_copy()
+                            message_to_trace.content = list(message_to_trace.content)
+
+                        message_to_trace.content[idx] = (  # type: ignore[index]  # mypy confused by .model_copy
+                            convert_to_openai_image_block(block)
+                        )
+                    elif (
+                        block.get("type") == "file"
+                        and is_data_content_block(block)  # v0 (image/audio/file) or v1
+                        and "base64" in block
+                        # Backward compat: convert v1 base64 blocks to v0
+                    ):
+                        if message_to_trace is message:
+                            # Shallow copy
+                            message_to_trace = message.model_copy()
+                            message_to_trace.content = list(message_to_trace.content)
+
+                        message_to_trace.content[idx] = {  # type: ignore[index]
+                            **{k: v for k, v in block.items() if k != "base64"},
+                            "data": block["base64"],
+                            "source_type": "base64",
+                        }
+                    elif len(block) == 1 and "type" not in block:
+                        # Tracing assumes all content blocks have a "type" key. Here
+                        # we add this key if it is missing, and there's an obvious
+                        # choice for the type (e.g., a single key in the block).
+                        if message_to_trace is message:
+                            # Shallow copy
+                            message_to_trace = message.model_copy()
+                            message_to_trace.content = list(message_to_trace.content)
+                        key = next(iter(block))
+                        message_to_trace.content[idx] = {  # type: ignore[index]
+                            "type": key,
+                            key: block[key],
+                        }
+        messages_to_trace.append(message_to_trace)
+
+    return messages_to_trace
+
+
+def generate_from_stream(stream: Iterator[ChatGenerationChunk]) -> ChatResult:
+    """Generate from a stream.
+
+    Args:
+        stream: Iterator of `ChatGenerationChunk`.
+
+    Raises:
+        ValueError: If no generations are found in the stream.
+
+    Returns:
+        Chat result.
+
+    """
+    generation = next(stream, None)
+    if generation:
+        generation += list(stream)
+    if generation is None:
+        msg = "No generations found in stream."
+        raise ValueError(msg)
+    return ChatResult(
+        generations=[
+            ChatGeneration(
+                message=message_chunk_to_message(generation.message),
+                generation_info=generation.generation_info,
+            )
+        ]
+    )
+
+
+async def agenerate_from_stream(
+    stream: AsyncIterator[ChatGenerationChunk],
+) -> ChatResult:
+    """Async generate from a stream.
+
+    Args:
+        stream: Iterator of `ChatGenerationChunk`.
+
+    Returns:
+        Chat result.
+
+    """
+    chunks = [chunk async for chunk in stream]
+    return await run_in_executor(None, generate_from_stream, iter(chunks))
+
+
+def _format_ls_structured_output(ls_structured_output_format: dict | None) -> dict:
+    if ls_structured_output_format:
+        try:
+            ls_structured_output_format_dict = {
+                "ls_structured_output_format": {
+                    "kwargs": ls_structured_output_format.get("kwargs", {}),
+                    "schema": convert_to_json_schema(
+                        ls_structured_output_format["schema"]
+                    ),
+                }
+            }
+        except ValueError:
+            ls_structured_output_format_dict = {}
+    else:
+        ls_structured_output_format_dict = {}
+
+    return ls_structured_output_format_dict
+
+
+class BaseChatModel(BaseLanguageModel[AIMessage], ABC):
+    r"""Base class for chat models.
+
+    Key imperative methods:
+        Methods that actually call the underlying model.
+
+        This table provides a brief overview of the main imperative methods. Please see the base `Runnable` reference for full documentation.
+
+        | Method                 | Input                                                        | Output                                                     | Description                                                                      |
+        | ---------------------- | ------------------------------------------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------------- |
+        | `invoke`               | `str` \| `list[dict | tuple | BaseMessage]` \| `PromptValue` | `BaseMessage`                                              | A single chat model call.                                                        |
+        | `ainvoke`              | `'''`                                                        | `BaseMessage`                                              | Defaults to running `invoke` in an async executor.                               |
+        | `stream`               | `'''`                                                        | `Iterator[BaseMessageChunk]`                               | Defaults to yielding output of `invoke`.                                         |
+        | `astream`              | `'''`                                                        | `AsyncIterator[BaseMessageChunk]`                          | Defaults to yielding output of `ainvoke`.                                        |
+        | `astream_events`       | `'''`                                                        | `AsyncIterator[StreamEvent]`                               | Event types: `on_chat_model_start`, `on_chat_model_stream`, `on_chat_model_end`. |
+        | `batch`                | `list[''']`                                                  | `list[BaseMessage]`                                        | Defaults to running `invoke` in concurrent threads.                              |
+        | `abatch`               | `list[''']`                                                  | `list[BaseMessage]`                                        | Defaults to running `ainvoke` in concurrent threads.                             |
+        | `batch_as_completed`   | `list[''']`                                                  | `Iterator[tuple[int, Union[BaseMessage, Exception]]]`      | Defaults to running `invoke` in concurrent threads.                              |
+        | `abatch_as_completed`  | `list[''']`                                                  | `AsyncIterator[tuple[int, Union[BaseMessage, Exception]]]` | Defaults to running `ainvoke` in concurrent threads.                             |
+
+    Key declarative methods:
+        Methods for creating another `Runnable` using the chat model.
+
+        This table provides a brief overview of the main declarative methods. Please see the reference for each method for full documentation.
+
+        | Method                       | Description                                                                                |
+        | ---------------------------- | ------------------------------------------------------------------------------------------ |
+        | `bind_tools`                 | Create chat model that can call tools.                                                     |
+        | `with_structured_output`     | Create wrapper that structures model output using schema.                                  |
+        | `with_retry`                 | Create wrapper that retries model calls on failure.                                        |
+        | `with_fallbacks`             | Create wrapper that falls back to other models on failure.                                 |
+        | `configurable_fields`        | Specify init args of the model that can be configured at runtime via the `RunnableConfig`. |
+        | `configurable_alternatives`  | Specify alternative models which can be swapped in at runtime via the `RunnableConfig`.    |
+
+    Creating custom chat model:
+        Custom chat model implementations should inherit from this class.
+        Please reference the table below for information about which
+        methods and properties are required or optional for implementations.
+
+        | Method/Property                  | Description                                                        | Required          |
+        | -------------------------------- | ------------------------------------------------------------------ | ----------------- |
+        | `_generate`                      | Use to generate a chat result from a prompt                        | Required          |
+        | `_llm_type` (property)           | Used to uniquely identify the type of the model. Used for logging. | Required          |
+        | `_identifying_params` (property) | Represent model parameterization for tracing purposes.             | Optional          |
+        | `_stream`                        | Use to implement streaming                                         | Optional          |
+        | `_agenerate`                     | Use to implement a native async method                             | Optional          |
+        | `_astream`                       | Use to implement async version of `_stream`                        | Optional          |
+
+    """  # noqa: E501
+
+    rate_limiter: BaseRateLimiter | None = Field(default=None, exclude=True)
+    "An optional rate limiter to use for limiting the number of requests."
+
+    disable_streaming: bool | Literal["tool_calling"] = False
+    """Whether to disable streaming for this model.
+
+    If streaming is bypassed, then `stream`/`astream`/`astream_events` will
+    defer to `invoke`/`ainvoke`.
+
+    - If `True`, will always bypass streaming case.
+    - If `'tool_calling'`, will bypass streaming case only when the model is called
+        with a `tools` keyword argument. In other words, LangChain will automatically
+        switch to non-streaming behavior (`invoke`) only when the tools argument is
+        provided. This offers the best of both worlds.
+    - If `False` (Default), will always use streaming case if available.
+
+    The main reason for this flag is that code might be written using `stream` and
+    a user may want to swap out a given model for another model whose the implementation
+    does not properly support streaming.
+    """
+
+    output_version: str | None = Field(
+        default_factory=from_env("LC_OUTPUT_VERSION", default=None)
+    )
+    """Version of `AIMessage` output format to store in message content.
+
+    `AIMessage.content_blocks` will lazily parse the contents of `content` into a
+    standard format. This flag can be used to additionally store the standard format
+    in message content, e.g., for serialization purposes.
+
+    Supported values:
+
+    - `'v0'`: provider-specific format in content (can lazily-parse with
+        `content_blocks`)
+    - `'v1'`: standardized format in content (consistent with `content_blocks`)
+
+    Partner packages (e.g.,
+    [`langchain-openai`](https://pypi.org/project/langchain-openai)) can also use this
+    field to roll out new content formats in a backward-compatible way.
+
+    !!! version-added "Added in `langchain-core` 1.0.0"
+
+    """
+
+    profile: ModelProfile | None = Field(default=None, exclude=True)
+    """Profile detailing model capabilities.
+
+    !!! warning "Beta feature"
+        This is a beta feature. The format of model profiles is subject to change.
+
+    If not specified, automatically loaded from the provider package on initialization
+    if data is available.
+
+    Example profile data includes context window sizes, supported modalities, or support
+    for tool calling, structured output, and other features.
+
+    !!! version-added "Added in `langchain-core` 1.1.0"
+    """
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
+
+    @cached_property
+    def _serialized(self) -> dict[str, Any]:
+        return dumpd(self)
+
+    # --- Runnable methods ---
+
+    @property
+    @override
+    def OutputType(self) -> Any:
+        """Get the output type for this `Runnable`."""
+        return AnyMessage
+
+    def _convert_input(self, model_input: LanguageModelInput) -> PromptValue:
+        if isinstance(model_input, PromptValue):
+            return model_input
+        if isinstance(model_input, str):
+            return StringPromptValue(text=model_input)
+        if isinstance(model_input, Sequence):
+            return ChatPromptValue(messages=convert_to_messages(model_input))
+        msg = (
+            f"Invalid input type {type(model_input)}. "
+            "Must be a PromptValue, str, or list of BaseMessages."
+        )
+        raise ValueError(msg)
+
+    @override
+    def invoke(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> AIMessage:
+        config = ensure_config(config)
+        return cast(
+            "AIMessage",
+            cast(
+                "ChatGeneration",
+                self.generate_prompt(
+                    [self._convert_input(input)],
+                    stop=stop,
+                    callbacks=config.get("callbacks"),
+                    tags=config.get("tags"),
+                    metadata=config.get("metadata"),
+                    run_name=config.get("run_name"),
+                    run_id=config.pop("run_id", None),
+                    **kwargs,
+                ).generations[0][0],
+            ).message,
+        )
+
+    @override
+    async def ainvoke(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> AIMessage:
+        config = ensure_config(config)
+        llm_result = await self.agenerate_prompt(
+            [self._convert_input(input)],
+            stop=stop,
+            callbacks=config.get("callbacks"),
+            tags=config.get("tags"),
+            metadata=config.get("metadata"),
+            run_name=config.get("run_name"),
+            run_id=config.pop("run_id", None),
+            **kwargs,
+        )
+        return cast(
+            "AIMessage", cast("ChatGeneration", llm_result.generations[0][0]).message
+        )
+
+    def _should_stream(
+        self,
+        *,
+        async_api: bool,
+        run_manager: CallbackManagerForLLMRun
+        | AsyncCallbackManagerForLLMRun
+        | None = None,
+        **kwargs: Any,
+    ) -> bool:
+        """Determine if a given model call should hit the streaming API."""
+        sync_not_implemented = type(self)._stream == BaseChatModel._stream  # noqa: SLF001
+        async_not_implemented = type(self)._astream == BaseChatModel._astream  # noqa: SLF001
+
+        # Check if streaming is implemented.
+        if (not async_api) and sync_not_implemented:
+            return False
+        # Note, since async falls back to sync we check both here.
+        if async_api and async_not_implemented and sync_not_implemented:
+            return False
+
+        # Check if streaming has been disabled on this instance.
+        if self.disable_streaming is True:
+            return False
+        # We assume tools are passed in via "tools" kwarg in all models.
+        if self.disable_streaming == "tool_calling" and kwargs.get("tools"):
+            return False
+
+        # Check if a runtime streaming flag has been passed in.
+        if "stream" in kwargs:
+            return kwargs["stream"]
+
+        if "streaming" in self.model_fields_set:
+            streaming_value = getattr(self, "streaming", None)
+            if isinstance(streaming_value, bool):
+                return streaming_value
+
+        # Check if any streaming callback handlers have been passed in.
+        handlers = run_manager.handlers if run_manager else []
+        return any(isinstance(h, _StreamingCallbackHandler) for h in handlers)
+
+    @override
+    def stream(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> Iterator[AIMessageChunk]:
+        if not self._should_stream(async_api=False, **{**kwargs, "stream": True}):
+            # Model doesn't implement streaming, so use default implementation
+            yield cast(
+                "AIMessageChunk",
+                self.invoke(input, config=config, stop=stop, **kwargs),
+            )
+        else:
+            config = ensure_config(config)
+            messages = self._convert_input(input).to_messages()
+            ls_structured_output_format = kwargs.pop(
+                "ls_structured_output_format", None
+            ) or kwargs.pop("structured_output_format", None)
+            ls_structured_output_format_dict = _format_ls_structured_output(
+                ls_structured_output_format
+            )
+
+            params = self._get_invocation_params(stop=stop, **kwargs)
+            options = {"stop": stop, **kwargs, **ls_structured_output_format_dict}
+            inheritable_metadata = {
+                **(config.get("metadata") or {}),
+                **self._get_ls_params(stop=stop, **kwargs),
+            }
+            callback_manager = CallbackManager.configure(
+                config.get("callbacks"),
+                self.callbacks,
+                self.verbose,
+                config.get("tags"),
+                self.tags,
+                inheritable_metadata,
+                self.metadata,
+            )
+            (run_manager,) = callback_manager.on_chat_model_start(
+                self._serialized,
+                [_format_for_tracing(messages)],
+                invocation_params=params,
+                options=options,
+                name=config.get("run_name"),
+                run_id=config.pop("run_id", None),
+                batch_size=1,
+            )
+
+            chunks: list[ChatGenerationChunk] = []
+
+            if self.rate_limiter:
+                self.rate_limiter.acquire(blocking=True)
+
+            try:
+                input_messages = _normalize_messages(messages)
+                run_id = "-".join((LC_ID_PREFIX, str(run_manager.run_id)))
+                yielded = False
+                index = -1
+                index_type = ""
+                for chunk in self._stream(input_messages, stop=stop, **kwargs):
+                    if chunk.message.id is None:
+                        chunk.message.id = run_id
+                    chunk.message.response_metadata = _gen_info_and_msg_metadata(chunk)
+                    if self.output_version == "v1":
+                        # Overwrite .content with .content_blocks
+                        chunk.message = _update_message_content_to_blocks(
+                            chunk.message, "v1"
+                        )
+                        for block in cast(
+                            "list[types.ContentBlock]", chunk.message.content
+                        ):
+                            if block["type"] != index_type:
+                                index_type = block["type"]
+                                index = index + 1
+                            if "index" not in block:
+                                block["index"] = index
+                    run_manager.on_llm_new_token(
+                        cast("str", chunk.message.content), chunk=chunk
+                    )
+                    chunks.append(chunk)
+                    yield cast("AIMessageChunk", chunk.message)
+                    yielded = True
+
+                # Yield a final empty chunk with chunk_position="last" if not yet
+                # yielded
+                if (
+                    yielded
+                    and isinstance(chunk.message, AIMessageChunk)
+                    and not chunk.message.chunk_position
+                ):
+                    empty_content: str | list = (
+                        "" if isinstance(chunk.message.content, str) else []
+                    )
+                    msg_chunk = AIMessageChunk(
+                        content=empty_content, chunk_position="last", id=run_id
+                    )
+                    run_manager.on_llm_new_token(
+                        "", chunk=ChatGenerationChunk(message=msg_chunk)
+                    )
+                    yield msg_chunk
+            except BaseException as e:
+                generations_with_error_metadata = _generate_response_from_error(e)
+                chat_generation_chunk = merge_chat_generation_chunks(chunks)
+                if chat_generation_chunk:
+                    generations = [
+                        [chat_generation_chunk],
+                        generations_with_error_metadata,
+                    ]
+                else:
+                    generations = [generations_with_error_metadata]
+                run_manager.on_llm_error(
+                    e,
+                    response=LLMResult(generations=generations),
+                )
+                raise
+
+            generation = merge_chat_generation_chunks(chunks)
+            if generation is None:
+                err = ValueError("No generation chunks were returned")
+                run_manager.on_llm_error(err, response=LLMResult(generations=[]))
+                raise err
+
+            run_manager.on_llm_end(LLMResult(generations=[[generation]]))
+
+    @override
+    async def astream(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[AIMessageChunk]:
+        if not self._should_stream(async_api=True, **{**kwargs, "stream": True}):
+            # No async or sync stream is implemented, so fall back to ainvoke
+            yield cast(
+                "AIMessageChunk",
+                await self.ainvoke(input, config=config, stop=stop, **kwargs),
+            )
+            return
+
+        config = ensure_config(config)
+        messages = self._convert_input(input).to_messages()
+
+        ls_structured_output_format = kwargs.pop(
+            "ls_structured_output_format", None
+        ) or kwargs.pop("structured_output_format", None)
+        ls_structured_output_format_dict = _format_ls_structured_output(
+            ls_structured_output_format
+        )
+
+        params = self._get_invocation_params(stop=stop, **kwargs)
+        options = {"stop": stop, **kwargs, **ls_structured_output_format_dict}
+        inheritable_metadata = {
+            **(config.get("metadata") or {}),
+            **self._get_ls_params(stop=stop, **kwargs),
+        }
+        callback_manager = AsyncCallbackManager.configure(
+            config.get("callbacks"),
+            self.callbacks,
+            self.verbose,
+            config.get("tags"),
+            self.tags,
+            inheritable_metadata,
+            self.metadata,
+        )
+        (run_manager,) = await callback_manager.on_chat_model_start(
+            self._serialized,
+            [_format_for_tracing(messages)],
+            invocation_params=params,
+            options=options,
+            name=config.get("run_name"),
+            run_id=config.pop("run_id", None),
+            batch_size=1,
+        )
+
+        if self.rate_limiter:
+            await self.rate_limiter.aacquire(blocking=True)
+
+        chunks: list[ChatGenerationChunk] = []
+
+        try:
+            input_messages = _normalize_messages(messages)
+            run_id = "-".join((LC_ID_PREFIX, str(run_manager.run_id)))
+            yielded = False
+            index = -1
+            index_type = ""
+            async for chunk in self._astream(
+                input_messages,
+                stop=stop,
+                **kwargs,
+            ):
+                if chunk.message.id is None:
+                    chunk.message.id = run_id
+                chunk.message.response_metadata = _gen_info_and_msg_metadata(chunk)
+                if self.output_version == "v1":
+                    # Overwrite .content with .content_blocks
+                    chunk.message = _update_message_content_to_blocks(
+                        chunk.message, "v1"
+                    )
+                    for block in cast(
+                        "list[types.ContentBlock]", chunk.message.content
+                    ):
+                        if block["type"] != index_type:
+                            index_type = block["type"]
+                            index = index + 1
+                        if "index" not in block:
+                            block["index"] = index
+                await run_manager.on_llm_new_token(
+                    cast("str", chunk.message.content), chunk=chunk
+                )
+                chunks.append(chunk)
+                yield cast("AIMessageChunk", chunk.message)
+                yielded = True
+
+            # Yield a final empty chunk with chunk_position="last" if not yet yielded
+            if (
+                yielded
+                and isinstance(chunk.message, AIMessageChunk)
+                and not chunk.message.chunk_position
+            ):
+                empty_content: str | list = (
+                    "" if isinstance(chunk.message.content, str) else []
+                )
+                msg_chunk = AIMessageChunk(
+                    content=empty_content, chunk_position="last", id=run_id
+                )
+                await run_manager.on_llm_new_token(
+                    "", chunk=ChatGenerationChunk(message=msg_chunk)
+                )
+                yield msg_chunk
+        except BaseException as e:
+            generations_with_error_metadata = _generate_response_from_error(e)
+            chat_generation_chunk = merge_chat_generation_chunks(chunks)
+            if chat_generation_chunk:
+                generations = [[chat_generation_chunk], generations_with_error_metadata]
+            else:
+                generations = [generations_with_error_metadata]
+            await run_manager.on_llm_error(
+                e,
+                response=LLMResult(generations=generations),
+            )
+            raise
+
+        generation = merge_chat_generation_chunks(chunks)
+        if not generation:
+            err = ValueError("No generation chunks were returned")
+            await run_manager.on_llm_error(err, response=LLMResult(generations=[]))
+            raise err
+
+        await run_manager.on_llm_end(
+            LLMResult(generations=[[generation]]),
+        )
+
+    # --- Custom methods ---
+
+    def _combine_llm_outputs(self, llm_outputs: list[dict | None]) -> dict:  # noqa: ARG002
+        return {}
+
+    def _convert_cached_generations(self, cache_val: list) -> list[ChatGeneration]:
+        """Convert cached Generation objects to ChatGeneration objects.
+
+        Handle case where cache contains Generation objects instead of
+        ChatGeneration objects. This can happen due to serialization/deserialization
+        issues or legacy cache data (see #22389).
+
+        Args:
+            cache_val: List of cached generation objects.
+
+        Returns:
+            List of ChatGeneration objects.
+
+        """
+        converted_generations = []
+        for gen in cache_val:
+            if isinstance(gen, Generation) and not isinstance(gen, ChatGeneration):
+                # Convert Generation to ChatGeneration by creating AIMessage
+                # from the text content
+                chat_gen = ChatGeneration(
+                    message=AIMessage(content=gen.text),
+                    generation_info=gen.generation_info,
+                )
+                converted_generations.append(chat_gen)
+            else:
+                # Already a ChatGeneration or other expected type
+                if hasattr(gen, "message") and isinstance(gen.message, AIMessage):
+                    # We zero out cost on cache hits
+                    gen.message = gen.message.model_copy(
+                        update={
+                            "usage_metadata": {
+                                **(gen.message.usage_metadata or {}),
+                                "total_cost": 0,
+                            }
+                        }
+                    )
+                converted_generations.append(gen)
+        return converted_generations
+
+    def _get_invocation_params(
+        self,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict:
+        params = self.dict()
+        params["stop"] = stop
+        return {**params, **kwargs}
+
+    def _get_ls_params(
+        self,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> LangSmithParams:
+        """Get standard params for tracing."""
+        # get default provider from class name
+        default_provider = self.__class__.__name__
+        if default_provider.startswith("Chat"):
+            default_provider = default_provider[4:].lower()
+        elif default_provider.endswith("Chat"):
+            default_provider = default_provider[:-4]
+        default_provider = default_provider.lower()
+
+        ls_params = LangSmithParams(ls_provider=default_provider, ls_model_type="chat")
+        if stop:
+            ls_params["ls_stop"] = stop
+
+        # model
+        if "model" in kwargs and isinstance(kwargs["model"], str):
+            ls_params["ls_model_name"] = kwargs["model"]
+        elif hasattr(self, "model") and isinstance(self.model, str):
+            ls_params["ls_model_name"] = self.model
+        elif hasattr(self, "model_name") and isinstance(self.model_name, str):
+            ls_params["ls_model_name"] = self.model_name
+
+        # temperature
+        if "temperature" in kwargs and isinstance(kwargs["temperature"], float):
+            ls_params["ls_temperature"] = kwargs["temperature"]
+        elif hasattr(self, "temperature") and isinstance(self.temperature, float):
+            ls_params["ls_temperature"] = self.temperature
+
+        # max_tokens
+        if "max_tokens" in kwargs and isinstance(kwargs["max_tokens"], int):
+            ls_params["ls_max_tokens"] = kwargs["max_tokens"]
+        elif hasattr(self, "max_tokens") and isinstance(self.max_tokens, int):
+            ls_params["ls_max_tokens"] = self.max_tokens
+
+        return ls_params
+
+    def _get_llm_string(self, stop: list[str] | None = None, **kwargs: Any) -> str:
+        if self.is_lc_serializable():
+            params = {**kwargs, "stop": stop}
+            param_string = str(sorted(params.items()))
+            # This code is not super efficient as it goes back and forth between
+            # json and dict.
+            serialized_repr = self._serialized
+            _cleanup_llm_representation(serialized_repr, 1)
+            llm_string = json.dumps(serialized_repr, sort_keys=True)
+            return llm_string + "---" + param_string
+        params = self._get_invocation_params(stop=stop, **kwargs)
+        params = {**params, **kwargs}
+        return str(sorted(params.items()))
+
+    def generate(
+        self,
+        messages: list[list[BaseMessage]],
+        stop: list[str] | None = None,
+        callbacks: Callbacks = None,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        run_name: str | None = None,
+        run_id: uuid.UUID | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Pass a sequence of prompts to the model and return model generations.
+
+        This method should make use of batched calls for models that expose a batched
+        API.
+
+        Use this method when you want to:
+
+        1. Take advantage of batched calls,
+        2. Need more output from the model than just the top generated value,
+        3. Are building chains that are agnostic to the underlying language model
+            type (e.g., pure text completion models vs chat models).
+
+        Args:
+            messages: List of list of messages.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+            callbacks: `Callbacks` to pass through.
+
+                Used for executing additional functionality, such as logging or
+                streaming, throughout generation.
+            tags: The tags to apply.
+            metadata: The metadata to apply.
+            run_name: The name of the run.
+            run_id: The ID of the run.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Returns:
+            An `LLMResult`, which contains a list of candidate `Generations` for each
+                input prompt and additional model provider-specific output.
+
+        """
+        ls_structured_output_format = kwargs.pop(
+            "ls_structured_output_format", None
+        ) or kwargs.pop("structured_output_format", None)
+        ls_structured_output_format_dict = _format_ls_structured_output(
+            ls_structured_output_format
+        )
+
+        params = self._get_invocation_params(stop=stop, **kwargs)
+        options = {"stop": stop, **ls_structured_output_format_dict}
+        inheritable_metadata = {
+            **(metadata or {}),
+            **self._get_ls_params(stop=stop, **kwargs),
+        }
+
+        callback_manager = CallbackManager.configure(
+            callbacks,
+            self.callbacks,
+            self.verbose,
+            tags,
+            self.tags,
+            inheritable_metadata,
+            self.metadata,
+        )
+        messages_to_trace = [
+            _format_for_tracing(message_list) for message_list in messages
+        ]
+        run_managers = callback_manager.on_chat_model_start(
+            self._serialized,
+            messages_to_trace,
+            invocation_params=params,
+            options=options,
+            name=run_name,
+            run_id=run_id,
+            batch_size=len(messages),
+        )
+        results = []
+        input_messages = [
+            _normalize_messages(message_list) for message_list in messages
+        ]
+        for i, m in enumerate(input_messages):
+            try:
+                results.append(
+                    self._generate_with_cache(
+                        m,
+                        stop=stop,
+                        run_manager=run_managers[i] if run_managers else None,
+                        **kwargs,
+                    )
+                )
+            except BaseException as e:
+                if run_managers:
+                    generations_with_error_metadata = _generate_response_from_error(e)
+                    run_managers[i].on_llm_error(
+                        e,
+                        response=LLMResult(
+                            generations=[generations_with_error_metadata]
+                        ),
+                    )
+                raise
+        flattened_outputs = [
+            LLMResult(generations=[res.generations], llm_output=res.llm_output)
+            for res in results
+        ]
+        llm_output = self._combine_llm_outputs([res.llm_output for res in results])
+        generations = [res.generations for res in results]
+        output = LLMResult(generations=generations, llm_output=llm_output)
+        if run_managers:
+            run_infos = []
+            for manager, flattened_output in zip(
+                run_managers, flattened_outputs, strict=False
+            ):
+                manager.on_llm_end(flattened_output)
+                run_infos.append(RunInfo(run_id=manager.run_id))
+            output.run = run_infos
+        return output
+
+    async def agenerate(
+        self,
+        messages: list[list[BaseMessage]],
+        stop: list[str] | None = None,
+        callbacks: Callbacks = None,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        run_name: str | None = None,
+        run_id: uuid.UUID | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Asynchronously pass a sequence of prompts to a model and return generations.
+
+        This method should make use of batched calls for models that expose a batched
+        API.
+
+        Use this method when you want to:
+
+        1. Take advantage of batched calls,
+        2. Need more output from the model than just the top generated value,
+        3. Are building chains that are agnostic to the underlying language model
+            type (e.g., pure text completion models vs chat models).
+
+        Args:
+            messages: List of list of messages.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+            callbacks: `Callbacks` to pass through.
+
+                Used for executing additional functionality, such as logging or
+                streaming, throughout generation.
+            tags: The tags to apply.
+            metadata: The metadata to apply.
+            run_name: The name of the run.
+            run_id: The ID of the run.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Returns:
+            An `LLMResult`, which contains a list of candidate `Generations` for each
+                input prompt and additional model provider-specific output.
+
+        """
+        ls_structured_output_format = kwargs.pop(
+            "ls_structured_output_format", None
+        ) or kwargs.pop("structured_output_format", None)
+        ls_structured_output_format_dict = _format_ls_structured_output(
+            ls_structured_output_format
+        )
+
+        params = self._get_invocation_params(stop=stop, **kwargs)
+        options = {"stop": stop, **ls_structured_output_format_dict}
+        inheritable_metadata = {
+            **(metadata or {}),
+            **self._get_ls_params(stop=stop, **kwargs),
+        }
+
+        callback_manager = AsyncCallbackManager.configure(
+            callbacks,
+            self.callbacks,
+            self.verbose,
+            tags,
+            self.tags,
+            inheritable_metadata,
+            self.metadata,
+        )
+
+        messages_to_trace = [
+            _format_for_tracing(message_list) for message_list in messages
+        ]
+        run_managers = await callback_manager.on_chat_model_start(
+            self._serialized,
+            messages_to_trace,
+            invocation_params=params,
+            options=options,
+            name=run_name,
+            batch_size=len(messages),
+            run_id=run_id,
+        )
+
+        input_messages = [
+            _normalize_messages(message_list) for message_list in messages
+        ]
+        results = await asyncio.gather(
+            *[
+                self._agenerate_with_cache(
+                    m,
+                    stop=stop,
+                    run_manager=run_managers[i] if run_managers else None,
+                    **kwargs,
+                )
+                for i, m in enumerate(input_messages)
+            ],
+            return_exceptions=True,
+        )
+        exceptions = []
+        for i, res in enumerate(results):
+            if isinstance(res, BaseException):
+                if run_managers:
+                    generations_with_error_metadata = _generate_response_from_error(res)
+                    await run_managers[i].on_llm_error(
+                        res,
+                        response=LLMResult(
+                            generations=[generations_with_error_metadata]
+                        ),
+                    )
+                exceptions.append(res)
+        if exceptions:
+            if run_managers:
+                await asyncio.gather(
+                    *[
+                        run_manager.on_llm_end(
+                            LLMResult(
+                                generations=[res.generations],  # type: ignore[union-attr]
+                                llm_output=res.llm_output,  # type: ignore[union-attr]
+                            )
+                        )
+                        for run_manager, res in zip(run_managers, results, strict=False)
+                        if not isinstance(res, Exception)
+                    ]
+                )
+            raise exceptions[0]
+        flattened_outputs = [
+            LLMResult(generations=[res.generations], llm_output=res.llm_output)  # type: ignore[union-attr]
+            for res in results
+        ]
+        llm_output = self._combine_llm_outputs([res.llm_output for res in results])  # type: ignore[union-attr]
+        generations = [res.generations for res in results]  # type: ignore[union-attr]
+        output = LLMResult(generations=generations, llm_output=llm_output)
+        await asyncio.gather(
+            *[
+                run_manager.on_llm_end(flattened_output)
+                for run_manager, flattened_output in zip(
+                    run_managers, flattened_outputs, strict=False
+                )
+            ]
+        )
+        if run_managers:
+            output.run = [
+                RunInfo(run_id=run_manager.run_id) for run_manager in run_managers
+            ]
+        return output
+
+    @override
+    def generate_prompt(
+        self,
+        prompts: list[PromptValue],
+        stop: list[str] | None = None,
+        callbacks: Callbacks = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        prompt_messages = [p.to_messages() for p in prompts]
+        return self.generate(prompt_messages, stop=stop, callbacks=callbacks, **kwargs)
+
+    @override
+    async def agenerate_prompt(
+        self,
+        prompts: list[PromptValue],
+        stop: list[str] | None = None,
+        callbacks: Callbacks = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        prompt_messages = [p.to_messages() for p in prompts]
+        return await self.agenerate(
+            prompt_messages, stop=stop, callbacks=callbacks, **kwargs
+        )
+
+    def _generate_with_cache(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        llm_cache = self.cache if isinstance(self.cache, BaseCache) else get_llm_cache()
+        # We should check the cache unless it's explicitly set to False
+        # A None cache means we should use the default global cache
+        # if it's configured.
+        check_cache = self.cache or self.cache is None
+        if check_cache:
+            if llm_cache:
+                llm_string = self._get_llm_string(stop=stop, **kwargs)
+                prompt = dumps(messages)
+                cache_val = llm_cache.lookup(prompt, llm_string)
+                if isinstance(cache_val, list):
+                    converted_generations = self._convert_cached_generations(cache_val)
+                    return ChatResult(generations=converted_generations)
+            elif self.cache is None:
+                pass
+            else:
+                msg = "Asked to cache, but no cache found at `langchain.cache`."
+                raise ValueError(msg)
+
+        # Apply the rate limiter after checking the cache, since
+        # we usually don't want to rate limit cache lookups, but
+        # we do want to rate limit API requests.
+        if self.rate_limiter:
+            self.rate_limiter.acquire(blocking=True)
+
+        # If stream is not explicitly set, check if implicitly requested by
+        # astream_events() or astream_log(). Bail out if _stream not implemented
+        if self._should_stream(
+            async_api=False,
+            run_manager=run_manager,
+            **kwargs,
+        ):
+            chunks: list[ChatGenerationChunk] = []
+            run_id: str | None = (
+                f"{LC_ID_PREFIX}-{run_manager.run_id}" if run_manager else None
+            )
+            yielded = False
+            index = -1
+            index_type = ""
+            for chunk in self._stream(messages, stop=stop, **kwargs):
+                chunk.message.response_metadata = _gen_info_and_msg_metadata(chunk)
+                if self.output_version == "v1":
+                    # Overwrite .content with .content_blocks
+                    chunk.message = _update_message_content_to_blocks(
+                        chunk.message, "v1"
+                    )
+                    for block in cast(
+                        "list[types.ContentBlock]", chunk.message.content
+                    ):
+                        if block["type"] != index_type:
+                            index_type = block["type"]
+                            index = index + 1
+                        if "index" not in block:
+                            block["index"] = index
+                if run_manager:
+                    if chunk.message.id is None:
+                        chunk.message.id = run_id
+                    run_manager.on_llm_new_token(
+                        cast("str", chunk.message.content), chunk=chunk
+                    )
+                chunks.append(chunk)
+                yielded = True
+
+            # Yield a final empty chunk with chunk_position="last" if not yet yielded
+            if (
+                yielded
+                and isinstance(chunk.message, AIMessageChunk)
+                and not chunk.message.chunk_position
+            ):
+                empty_content: str | list = (
+                    "" if isinstance(chunk.message.content, str) else []
+                )
+                chunk = ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content=empty_content, chunk_position="last", id=run_id
+                    )
+                )
+                if run_manager:
+                    run_manager.on_llm_new_token("", chunk=chunk)
+                chunks.append(chunk)
+            result = generate_from_stream(iter(chunks))
+        elif inspect.signature(self._generate).parameters.get("run_manager"):
+            result = self._generate(
+                messages, stop=stop, run_manager=run_manager, **kwargs
+            )
+        else:
+            result = self._generate(messages, stop=stop, **kwargs)
+
+        if self.output_version == "v1":
+            # Overwrite .content with .content_blocks
+            for generation in result.generations:
+                generation.message = _update_message_content_to_blocks(
+                    generation.message, "v1"
+                )
+
+        # Add response metadata to each generation
+        for idx, generation in enumerate(result.generations):
+            if run_manager and generation.message.id is None:
+                generation.message.id = f"{LC_ID_PREFIX}-{run_manager.run_id}-{idx}"
+            generation.message.response_metadata = _gen_info_and_msg_metadata(
+                generation
+            )
+        if len(result.generations) == 1 and result.llm_output is not None:
+            result.generations[0].message.response_metadata = {
+                **result.llm_output,
+                **result.generations[0].message.response_metadata,
+            }
+        if check_cache and llm_cache:
+            llm_cache.update(prompt, llm_string, result.generations)
+        return result
+
+    async def _agenerate_with_cache(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        llm_cache = self.cache if isinstance(self.cache, BaseCache) else get_llm_cache()
+        # We should check the cache unless it's explicitly set to False
+        # A None cache means we should use the default global cache
+        # if it's configured.
+        check_cache = self.cache or self.cache is None
+        if check_cache:
+            if llm_cache:
+                llm_string = self._get_llm_string(stop=stop, **kwargs)
+                prompt = dumps(messages)
+                cache_val = await llm_cache.alookup(prompt, llm_string)
+                if isinstance(cache_val, list):
+                    converted_generations = self._convert_cached_generations(cache_val)
+                    return ChatResult(generations=converted_generations)
+            elif self.cache is None:
+                pass
+            else:
+                msg = "Asked to cache, but no cache found at `langchain.cache`."
+                raise ValueError(msg)
+
+        # Apply the rate limiter after checking the cache, since
+        # we usually don't want to rate limit cache lookups, but
+        # we do want to rate limit API requests.
+        if self.rate_limiter:
+            await self.rate_limiter.aacquire(blocking=True)
+
+        # If stream is not explicitly set, check if implicitly requested by
+        # astream_events() or astream_log(). Bail out if _astream not implemented
+        if self._should_stream(
+            async_api=True,
+            run_manager=run_manager,
+            **kwargs,
+        ):
+            chunks: list[ChatGenerationChunk] = []
+            run_id: str | None = (
+                f"{LC_ID_PREFIX}-{run_manager.run_id}" if run_manager else None
+            )
+            yielded = False
+            index = -1
+            index_type = ""
+            async for chunk in self._astream(messages, stop=stop, **kwargs):
+                chunk.message.response_metadata = _gen_info_and_msg_metadata(chunk)
+                if self.output_version == "v1":
+                    # Overwrite .content with .content_blocks
+                    chunk.message = _update_message_content_to_blocks(
+                        chunk.message, "v1"
+                    )
+                    for block in cast(
+                        "list[types.ContentBlock]", chunk.message.content
+                    ):
+                        if block["type"] != index_type:
+                            index_type = block["type"]
+                            index = index + 1
+                        if "index" not in block:
+                            block["index"] = index
+                if run_manager:
+                    if chunk.message.id is None:
+                        chunk.message.id = run_id
+                    await run_manager.on_llm_new_token(
+                        cast("str", chunk.message.content), chunk=chunk
+                    )
+                chunks.append(chunk)
+                yielded = True
+
+            # Yield a final empty chunk with chunk_position="last" if not yet yielded
+            if (
+                yielded
+                and isinstance(chunk.message, AIMessageChunk)
+                and not chunk.message.chunk_position
+            ):
+                empty_content: str | list = (
+                    "" if isinstance(chunk.message.content, str) else []
+                )
+                chunk = ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content=empty_content, chunk_position="last", id=run_id
+                    )
+                )
+                if run_manager:
+                    await run_manager.on_llm_new_token("", chunk=chunk)
+                chunks.append(chunk)
+            result = generate_from_stream(iter(chunks))
+        elif inspect.signature(self._agenerate).parameters.get("run_manager"):
+            result = await self._agenerate(
+                messages, stop=stop, run_manager=run_manager, **kwargs
+            )
+        else:
+            result = await self._agenerate(messages, stop=stop, **kwargs)
+
+        if self.output_version == "v1":
+            # Overwrite .content with .content_blocks
+            for generation in result.generations:
+                generation.message = _update_message_content_to_blocks(
+                    generation.message, "v1"
+                )
+
+        # Add response metadata to each generation
+        for idx, generation in enumerate(result.generations):
+            if run_manager and generation.message.id is None:
+                generation.message.id = f"{LC_ID_PREFIX}-{run_manager.run_id}-{idx}"
+            generation.message.response_metadata = _gen_info_and_msg_metadata(
+                generation
+            )
+        if len(result.generations) == 1 and result.llm_output is not None:
+            result.generations[0].message.response_metadata = {
+                **result.llm_output,
+                **result.generations[0].message.response_metadata,
+            }
+        if check_cache and llm_cache:
+            await llm_cache.aupdate(prompt, llm_string, result.generations)
+        return result
+
+    @abstractmethod
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        """Generate the result.
+
+        Args:
+            messages: The messages to generate from.
+            stop: Optional list of stop words to use when generating.
+            run_manager: Optional callback manager to use for this call.
+            **kwargs: Additional keyword arguments to pass to the model.
+
+        Returns:
+            The chat result.
+        """
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        """Generate the result.
+
+        Args:
+            messages: The messages to generate from.
+            stop: Optional list of stop words to use when generating.
+            run_manager: Optional callback manager to use for this call.
+            **kwargs: Additional keyword arguments to pass to the model.
+
+        Returns:
+            The chat result.
+        """
+        return await run_in_executor(
+            None,
+            self._generate,
+            messages,
+            stop,
+            run_manager.get_sync() if run_manager else None,
+            **kwargs,
+        )
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        """Stream the output of the model.
+
+        Args:
+            messages: The messages to generate from.
+            stop: Optional list of stop words to use when generating.
+            run_manager: Optional callback manager to use for this call.
+            **kwargs: Additional keyword arguments to pass to the model.
+
+        Yields:
+            The chat generation chunks.
+        """
+        raise NotImplementedError
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        """Stream the output of the model.
+
+        Args:
+            messages: The messages to generate from.
+            stop: Optional list of stop words to use when generating.
+            run_manager: Optional callback manager to use for this call.
+            **kwargs: Additional keyword arguments to pass to the model.
+
+        Yields:
+            The chat generation chunks.
+        """
+        iterator = await run_in_executor(
+            None,
+            self._stream,
+            messages,
+            stop,
+            run_manager.get_sync() if run_manager else None,
+            **kwargs,
+        )
+        done = object()
+        while True:
+            item = await run_in_executor(
+                None,
+                next,
+                iterator,
+                done,
+            )
+            if item is done:
+                break
+            yield item  # type: ignore[misc]
+
+    async def _call_async(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        callbacks: Callbacks = None,
+        **kwargs: Any,
+    ) -> BaseMessage:
+        result = await self.agenerate(
+            [messages], stop=stop, callbacks=callbacks, **kwargs
+        )
+        generation = result.generations[0][0]
+        if isinstance(generation, ChatGeneration):
+            return generation.message
+        msg = "Unexpected generation type"
+        raise ValueError(msg)
+
+    @property
+    @abstractmethod
+    def _llm_type(self) -> str:
+        """Return type of chat model."""
+
+    @override
+    def dict(self, **kwargs: Any) -> dict:
+        """Return a dictionary of the LLM."""
+        starter_dict = dict(self._identifying_params)
+        starter_dict["_type"] = self._llm_type
+        return starter_dict
+
+    def bind_tools(
+        self,
+        tools: Sequence[
+            typing.Dict[str, Any] | type | Callable | BaseTool  # noqa: UP006
+        ],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, AIMessage]:
+        """Bind tools to the model.
+
+        Args:
+            tools: Sequence of tools to bind to the model.
+            tool_choice: The tool to use. If "any" then any tool can be used.
+
+        Returns:
+            A Runnable that returns a message.
+
+        """
+        raise NotImplementedError
+
+    def with_structured_output(
+        self,
+        schema: typing.Dict | type,  # noqa: UP006
+        *,
+        include_raw: bool = False,
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, typing.Dict | BaseModel]:  # noqa: UP006
+        """Model wrapper that returns outputs formatted to match the given schema.
+
+        Args:
+            schema: The output schema. Can be passed in as:
+
+                - An OpenAI function/tool schema,
+                - A JSON Schema,
+                - A `TypedDict` class,
+                - Or a Pydantic class.
+
+                If `schema` is a Pydantic class then the model output will be a
+                Pydantic instance of that class, and the model-generated fields will be
+                validated by the Pydantic class. Otherwise the model output will be a
+                dict and will not be validated.
+
+                See `langchain_core.utils.function_calling.convert_to_openai_tool` for
+                more on how to properly specify types and descriptions of schema fields
+                when specifying a Pydantic or `TypedDict` class.
+
+            include_raw:
+                If `False` then only the parsed structured output is returned.
+
+                If an error occurs during model output parsing it will be raised.
+
+                If `True` then both the raw model response (a `BaseMessage`) and the
+                parsed model response will be returned.
+
+                If an error occurs during output parsing it will be caught and returned
+                as well.
+
+                The final output is always a `dict` with keys `'raw'`, `'parsed'`, and
+                `'parsing_error'`.
+
+        Raises:
+            ValueError: If there are any unsupported `kwargs`.
+            NotImplementedError: If the model does not implement
+                `with_structured_output()`.
+
+        Returns:
+            A `Runnable` that takes same inputs as a
+                `langchain_core.language_models.chat.BaseChatModel`. If `include_raw` is
+                `False` and `schema` is a Pydantic class, `Runnable` outputs an instance
+                of `schema` (i.e., a Pydantic object). Otherwise, if `include_raw` is
+                `False` then `Runnable` outputs a `dict`.
+
+                If `include_raw` is `True`, then `Runnable` outputs a `dict` with keys:
+
+                - `'raw'`: `BaseMessage`
+                - `'parsed'`: `None` if there was a parsing error, otherwise the type
+                    depends on the `schema` as described above.
+                - `'parsing_error'`: `BaseException | None`
+
+        Example: Pydantic schema (`include_raw=False`):
+
+        ```python
+        from pydantic import BaseModel
+
+
+        class AnswerWithJustification(BaseModel):
+            '''An answer to the user question along with justification for the answer.'''
+
+            answer: str
+            justification: str
+
+
+        model = ChatModel(model="model-name", temperature=0)
+        structured_model = model.with_structured_output(AnswerWithJustification)
+
+        structured_model.invoke(
+            "What weighs more a pound of bricks or a pound of feathers"
+        )
+
+        # -> AnswerWithJustification(
+        #     answer='They weigh the same',
+        #     justification='Both a pound of bricks and a pound of feathers weigh one pound. The weight is the same, but the volume or density of the objects may differ.'
+        # )
+        ```
+
+        Example: Pydantic schema (`include_raw=True`):
+
+        ```python
+        from pydantic import BaseModel
+
+
+        class AnswerWithJustification(BaseModel):
+            '''An answer to the user question along with justification for the answer.'''
+
+            answer: str
+            justification: str
+
+
+        model = ChatModel(model="model-name", temperature=0)
+        structured_model = model.with_structured_output(
+            AnswerWithJustification, include_raw=True
+        )
+
+        structured_model.invoke(
+            "What weighs more a pound of bricks or a pound of feathers"
+        )
+        # -> {
+        #     'raw': AIMessage(content='', additional_kwargs={'tool_calls': [{'id': 'call_Ao02pnFYXD6GN1yzc0uXPsvF', 'function': {'arguments': '{"answer":"They weigh the same.","justification":"Both a pound of bricks and a pound of feathers weigh one pound. The weight is the same, but the volume or density of the objects may differ."}', 'name': 'AnswerWithJustification'}, 'type': 'function'}]}),
+        #     'parsed': AnswerWithJustification(answer='They weigh the same.', justification='Both a pound of bricks and a pound of feathers weigh one pound. The weight is the same, but the volume or density of the objects may differ.'),
+        #     'parsing_error': None
+        # }
+        ```
+
+        Example: Dictionary schema (`include_raw=False`):
+
+        ```python
+        from pydantic import BaseModel
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+
+
+        class AnswerWithJustification(BaseModel):
+            '''An answer to the user question along with justification for the answer.'''
+
+            answer: str
+            justification: str
+
+
+        dict_schema = convert_to_openai_tool(AnswerWithJustification)
+        model = ChatModel(model="model-name", temperature=0)
+        structured_model = model.with_structured_output(dict_schema)
+
+        structured_model.invoke(
+            "What weighs more a pound of bricks or a pound of feathers"
+        )
+        # -> {
+        #     'answer': 'They weigh the same',
+        #     'justification': 'Both a pound of bricks and a pound of feathers weigh one pound. The weight is the same, but the volume and density of the two substances differ.'
+        # }
+        ```
+
+        !!! warning "Behavior changed in `langchain-core` 0.2.26"
+
+            Added support for `TypedDict` class.
+
+        """  # noqa: E501
+        _ = kwargs.pop("method", None)
+        _ = kwargs.pop("strict", None)
+        if kwargs:
+            msg = f"Received unsupported arguments {kwargs}"
+            raise ValueError(msg)
+
+        if type(self).bind_tools is BaseChatModel.bind_tools:
+            msg = "with_structured_output is not implemented for this model."
+            raise NotImplementedError(msg)
+
+        llm = self.bind_tools(
+            [schema],
+            tool_choice="any",
+            ls_structured_output_format={
+                "kwargs": {"method": "function_calling"},
+                "schema": schema,
+            },
+        )
+        if isinstance(schema, type) and is_basemodel_subclass(schema):
+            output_parser: OutputParserLike = PydanticToolsParser(
+                tools=[cast("TypeBaseModel", schema)], first_tool_only=True
+            )
+        else:
+            key_name = convert_to_openai_tool(schema)["function"]["name"]
+            output_parser = JsonOutputKeyToolsParser(
+                key_name=key_name, first_tool_only=True
+            )
+        if include_raw:
+            parser_assign = RunnablePassthrough.assign(
+                parsed=itemgetter("raw") | output_parser, parsing_error=lambda _: None
+            )
+            parser_none = RunnablePassthrough.assign(parsed=lambda _: None)
+            parser_with_fallback = parser_assign.with_fallbacks(
+                [parser_none], exception_key="parsing_error"
+            )
+            return RunnableMap(raw=llm) | parser_with_fallback
+        return llm | output_parser
+
+
+class SimpleChatModel(BaseChatModel):
+    """Simplified implementation for a chat model to inherit from.
+
+    !!! note
+        This implementation is primarily here for backwards compatibility. For new
+        implementations, please use `BaseChatModel` directly.
+
+    """
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        output_str = self._call(messages, stop=stop, run_manager=run_manager, **kwargs)
+        message = AIMessage(content=output_str)
+        generation = ChatGeneration(message=message)
+        return ChatResult(generations=[generation])
+
+    @abstractmethod
+    def _call(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Simpler interface."""
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        return await run_in_executor(
+            None,
+            self._generate,
+            messages,
+            stop=stop,
+            run_manager=run_manager.get_sync() if run_manager else None,
+            **kwargs,
+        )
+
+
+def _gen_info_and_msg_metadata(
+    generation: ChatGeneration | ChatGenerationChunk,
+) -> dict:
+    return {
+        **(generation.generation_info or {}),
+        **generation.message.response_metadata,
+    }
+
+
+_MAX_CLEANUP_DEPTH = 100
+
+
+def _cleanup_llm_representation(serialized: Any, depth: int) -> None:
+    """Remove non-serializable objects from a serialized object."""
+    if depth > _MAX_CLEANUP_DEPTH:  # Don't cooperate for pathological cases
+        return
+
+    if not isinstance(serialized, dict):
+        return
+
+    if (
+        "type" in serialized
+        and serialized["type"] == "not_implemented"
+        and "repr" in serialized
+    ):
+        del serialized["repr"]
+
+    if "graph" in serialized:
+        del serialized["graph"]
+
+    if "kwargs" in serialized:
+        kwargs = serialized["kwargs"]
+
+        for value in kwargs.values():
+            _cleanup_llm_representation(value, depth + 1)
+
+
+---
+### libs/core/langchain_core/language_models/fake.py
+
+"""Fake LLMs for testing purposes."""
+
+import asyncio
+import time
+from collections.abc import AsyncIterator, Iterator, Mapping
+from typing import Any
+
+from typing_extensions import override
+
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
+from langchain_core.language_models import LanguageModelInput
+from langchain_core.language_models.llms import LLM
+from langchain_core.runnables import RunnableConfig
+
+
+class FakeListLLM(LLM):
+    """Fake LLM for testing purposes."""
+
+    responses: list[str]
+    """List of responses to return in order."""
+    # This parameter should be removed from FakeListLLM since
+    # it's only used by sub-classes.
+    sleep: float | None = None
+    """Sleep time in seconds between responses.
+
+    Ignored by FakeListLLM, but used by sub-classes.
+    """
+    i: int = 0
+    """Internally incremented after every model invocation.
+
+    Useful primarily for testing purposes.
+    """
+
+    @property
+    @override
+    def _llm_type(self) -> str:
+        """Return type of llm."""
+        return "fake-list"
+
+    @override
+    def _call(
+        self,
+        prompt: str,
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Return next response."""
+        response = self.responses[self.i]
+        if self.i < len(self.responses) - 1:
+            self.i += 1
+        else:
+            self.i = 0
+        return response
+
+    @override
+    async def _acall(
+        self,
+        prompt: str,
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Return next response."""
+        response = self.responses[self.i]
+        if self.i < len(self.responses) - 1:
+            self.i += 1
+        else:
+            self.i = 0
+        return response
+
+    @property
+    @override
+    def _identifying_params(self) -> Mapping[str, Any]:
+        return {"responses": self.responses}
+
+
+class FakeListLLMError(Exception):
+    """Fake error for testing purposes."""
+
+
+class FakeStreamingListLLM(FakeListLLM):
+    """Fake streaming list LLM for testing purposes.
+
+    An LLM that will return responses from a list in order.
+
+    This model also supports optionally sleeping between successive
+    chunks in a streaming implementation.
+    """
+
+    error_on_chunk_number: int | None = None
+    """If set, will raise an exception on the specified chunk number."""
+
+    @override
+    def stream(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        result = self.invoke(input, config)
+        for i_c, c in enumerate(result):
+            if self.sleep is not None:
+                time.sleep(self.sleep)
+
+            if (
+                self.error_on_chunk_number is not None
+                and i_c == self.error_on_chunk_number
+            ):
+                raise FakeListLLMError
+            yield c
+
+    @override
+    async def astream(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        result = await self.ainvoke(input, config)
+        for i_c, c in enumerate(result):
+            if self.sleep is not None:
+                await asyncio.sleep(self.sleep)
+
+            if (
+                self.error_on_chunk_number is not None
+                and i_c == self.error_on_chunk_number
+            ):
+                raise FakeListLLMError
+            yield c
+
+
+---
+### libs/core/langchain_core/language_models/fake_chat_models.py
+
+"""Fake chat models for testing purposes."""
+
+import asyncio
+import re
+import time
+from collections.abc import AsyncIterator, Iterator
+from typing import Any, Literal, cast
+
+from typing_extensions import override
+
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
+from langchain_core.language_models.chat_models import BaseChatModel, SimpleChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.runnables import RunnableConfig
+
+
+class FakeMessagesListChatModel(BaseChatModel):
+    """Fake chat model for testing purposes."""
+
+    responses: list[BaseMessage]
+    """List of responses to **cycle** through in order."""
+    sleep: float | None = None
+    """Sleep time in seconds between responses."""
+    i: int = 0
+    """Internally incremented after every model invocation."""
+
+    @override
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        if self.sleep is not None:
+            time.sleep(self.sleep)
+        response = self.responses[self.i]
+        if self.i < len(self.responses) - 1:
+            self.i += 1
+        else:
+            self.i = 0
+        generation = ChatGeneration(message=response)
+        return ChatResult(generations=[generation])
+
+    @property
+    @override
+    def _llm_type(self) -> str:
+        return "fake-messages-list-chat-model"
+
+
+class FakeListChatModelError(Exception):
+    """Fake error for testing purposes."""
+
+
+class FakeListChatModel(SimpleChatModel):
+    """Fake chat model for testing purposes."""
+
+    responses: list[str]
+    """List of responses to **cycle** through in order."""
+    sleep: float | None = None
+    i: int = 0
+    """Internally incremented after every model invocation."""
+    error_on_chunk_number: int | None = None
+    """If set, raise an error on the specified chunk number during streaming."""
+
+    @property
+    @override
+    def _llm_type(self) -> str:
+        return "fake-list-chat-model"
+
+    @override
+    def _call(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> str:
+        """Return the next response in the list.
+
+        Cycle back to the start if at the end.
+        """
+        if self.sleep is not None:
+            time.sleep(self.sleep)
+        response = self.responses[self.i]
+        if self.i < len(self.responses) - 1:
+            self.i += 1
+        else:
+            self.i = 0
+        return response
+
+    @override
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        response = self.responses[self.i]
+        if self.i < len(self.responses) - 1:
+            self.i += 1
+        else:
+            self.i = 0
+        for i_c, c in enumerate(response):
+            if self.sleep is not None:
+                time.sleep(self.sleep)
+            if (
+                self.error_on_chunk_number is not None
+                and i_c == self.error_on_chunk_number
+            ):
+                raise FakeListChatModelError
+
+            chunk_position: Literal["last"] | None = (
+                "last" if i_c == len(response) - 1 else None
+            )
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content=c, chunk_position=chunk_position)
+            )
+
+    @override
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        response = self.responses[self.i]
+        if self.i < len(self.responses) - 1:
+            self.i += 1
+        else:
+            self.i = 0
+        for i_c, c in enumerate(response):
+            if self.sleep is not None:
+                await asyncio.sleep(self.sleep)
+            if (
+                self.error_on_chunk_number is not None
+                and i_c == self.error_on_chunk_number
+            ):
+                raise FakeListChatModelError
+            chunk_position: Literal["last"] | None = (
+                "last" if i_c == len(response) - 1 else None
+            )
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content=c, chunk_position=chunk_position)
+            )
+
+    @property
+    @override
+    def _identifying_params(self) -> dict[str, Any]:
+        return {"responses": self.responses}
+
+    @override
+    # manually override batch to preserve batch ordering with no concurrency
+    def batch(
+        self,
+        inputs: list[Any],
+        config: RunnableConfig | list[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> list[AIMessage]:
+        if isinstance(config, list):
+            return [
+                self.invoke(m, c, **kwargs)
+                for m, c in zip(inputs, config, strict=False)
+            ]
+        return [self.invoke(m, config, **kwargs) for m in inputs]
+
+    @override
+    async def abatch(
+        self,
+        inputs: list[Any],
+        config: RunnableConfig | list[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> list[AIMessage]:
+        if isinstance(config, list):
+            # do Not use an async iterator here because need explicit ordering
+            return [
+                await self.ainvoke(m, c, **kwargs)
+                for m, c in zip(inputs, config, strict=False)
+            ]
+        # do Not use an async iterator here because need explicit ordering
+        return [await self.ainvoke(m, config, **kwargs) for m in inputs]
+
+
+class FakeChatModel(SimpleChatModel):
+    """Fake Chat Model wrapper for testing purposes."""
+
+    @override
+    def _call(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> str:
+        return "fake response"
+
+    @override
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        output_str = "fake response"
+        message = AIMessage(content=output_str)
+        generation = ChatGeneration(message=message)
+        return ChatResult(generations=[generation])
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-chat-model"
+
+    @property
+    def _identifying_params(self) -> dict[str, Any]:
+        return {"key": "fake"}
+
+
+class GenericFakeChatModel(BaseChatModel):
+    """Generic fake chat model that can be used to test the chat model interface.
+
+    * Chat model should be usable in both sync and async tests
+    * Invokes `on_llm_new_token` to allow for testing of callback related code for new
+        tokens.
+    * Includes logic to break messages into message chunk to facilitate testing of
+        streaming.
+
+    """
+
+    messages: Iterator[AIMessage | str]
+    """Get an iterator over messages.
+
+    This can be expanded to accept other types like Callables / dicts / strings
+    to make the interface more generic if needed.
+
+    !!! note
+        if you want to pass a list, you can use `iter` to convert it to an iterator.
+
+    !!! warning
+        Streaming is not implemented yet. We should try to implement it in the future by
+        delegating to invoke and then breaking the resulting output into message chunks.
+
+    """
+
+    @override
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        message = next(self.messages)
+        message_ = AIMessage(content=message) if isinstance(message, str) else message
+        generation = ChatGeneration(message=message_)
+        return ChatResult(generations=[generation])
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        chat_result = self._generate(
+            messages, stop=stop, run_manager=run_manager, **kwargs
+        )
+        if not isinstance(chat_result, ChatResult):
+            msg = (
+                f"Expected generate to return a ChatResult, "
+                f"but got {type(chat_result)} instead."
+            )
+            raise ValueError(msg)  # noqa: TRY004
+
+        message = chat_result.generations[0].message
+
+        if not isinstance(message, AIMessage):
+            msg = (
+                f"Expected invoke to return an AIMessage, "
+                f"but got {type(message)} instead."
+            )
+            raise ValueError(msg)  # noqa: TRY004
+
+        content = message.content
+
+        if content:
+            # Use a regular expression to split on whitespace with a capture group
+            # so that we can preserve the whitespace in the output.
+            if not isinstance(content, str):
+                msg = "Expected content to be a string."
+                raise ValueError(msg)
+
+            content_chunks = cast("list[str]", re.split(r"(\s)", content))
+
+            for idx, token in enumerate(content_chunks):
+                chunk = ChatGenerationChunk(
+                    message=AIMessageChunk(content=token, id=message.id)
+                )
+                if (
+                    idx == len(content_chunks) - 1
+                    and isinstance(chunk.message, AIMessageChunk)
+                    and not message.additional_kwargs
+                ):
+                    chunk.message.chunk_position = "last"
+                if run_manager:
+                    run_manager.on_llm_new_token(token, chunk=chunk)
+                yield chunk
+
+        if message.additional_kwargs:
+            for key, value in message.additional_kwargs.items():
+                # We should further break down the additional kwargs into chunks
+                # Special case for function call
+                if key == "function_call":
+                    for fkey, fvalue in value.items():
+                        if isinstance(fvalue, str):
+                            # Break function call by `,`
+                            fvalue_chunks = cast("list[str]", re.split(r"(,)", fvalue))
+                            for fvalue_chunk in fvalue_chunks:
+                                chunk = ChatGenerationChunk(
+                                    message=AIMessageChunk(
+                                        id=message.id,
+                                        content="",
+                                        additional_kwargs={
+                                            "function_call": {fkey: fvalue_chunk}
+                                        },
+                                    )
+                                )
+                                if run_manager:
+                                    run_manager.on_llm_new_token(
+                                        "",
+                                        chunk=chunk,  # No token for function call
+                                    )
+                                yield chunk
+                        else:
+                            chunk = ChatGenerationChunk(
+                                message=AIMessageChunk(
+                                    id=message.id,
+                                    content="",
+                                    additional_kwargs={"function_call": {fkey: fvalue}},
+                                )
+                            )
+                            if run_manager:
+                                run_manager.on_llm_new_token(
+                                    "",
+                                    chunk=chunk,  # No token for function call
+                                )
+                            yield chunk
+                else:
+                    chunk = ChatGenerationChunk(
+                        message=AIMessageChunk(
+                            id=message.id, content="", additional_kwargs={key: value}
+                        )
+                    )
+                    if run_manager:
+                        run_manager.on_llm_new_token(
+                            "",
+                            chunk=chunk,  # No token for function call
+                        )
+                    yield chunk
+
+    @property
+    def _llm_type(self) -> str:
+        return "generic-fake-chat-model"
+
+
+class ParrotFakeChatModel(BaseChatModel):
+    """Generic fake chat model that can be used to test the chat model interface.
+
+    * Chat model should be usable in both sync and async tests
+
+    """
+
+    @override
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        return ChatResult(generations=[ChatGeneration(message=messages[-1])])
+
+    @property
+    def _llm_type(self) -> str:
+        return "parrot-fake-chat-model"
+
+
+---
+### libs/core/langchain_core/language_models/llms.py
+
+"""Base interface for traditional large language models (LLMs) to expose.
+
+These are traditionally older models (newer models generally are chat models).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import functools
+import inspect
+import json
+import logging
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    cast,
+)
+
+import yaml
+from pydantic import ConfigDict
+from tenacity import (
+    RetryCallState,
+    before_sleep_log,
+    retry,
+    retry_base,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+from typing_extensions import override
+
+from langchain_core.caches import BaseCache
+from langchain_core.callbacks import (
+    AsyncCallbackManager,
+    AsyncCallbackManagerForLLMRun,
+    BaseCallbackManager,
+    CallbackManager,
+    CallbackManagerForLLMRun,
+    Callbacks,
+)
+from langchain_core.globals import get_llm_cache
+from langchain_core.language_models.base import (
+    BaseLanguageModel,
+    LangSmithParams,
+    LanguageModelInput,
+)
+from langchain_core.load import dumpd
+from langchain_core.messages import (
+    convert_to_messages,
+)
+from langchain_core.outputs import Generation, GenerationChunk, LLMResult, RunInfo
+from langchain_core.prompt_values import ChatPromptValue, PromptValue, StringPromptValue
+from langchain_core.runnables import RunnableConfig, ensure_config, get_config_list
+from langchain_core.runnables.config import run_in_executor
+
+if TYPE_CHECKING:
+    import uuid
+
+logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache
+def _log_error_once(msg: str) -> None:
+    """Log an error once."""
+    logger.error(msg)
+
+
+def create_base_retry_decorator(
+    error_types: list[type[BaseException]],
+    max_retries: int = 1,
+    run_manager: AsyncCallbackManagerForLLMRun | CallbackManagerForLLMRun | None = None,
+) -> Callable[[Any], Any]:
+    """Create a retry decorator for a given LLM and provided a list of error types.
+
+    Args:
+        error_types: List of error types to retry on.
+        max_retries: Number of retries.
+        run_manager: Callback manager for the run.
+
+    Returns:
+        A retry decorator.
+
+    Raises:
+        ValueError: If the cache is not set and cache is True.
+    """
+    logging_ = before_sleep_log(logger, logging.WARNING)
+
+    def _before_sleep(retry_state: RetryCallState) -> None:
+        logging_(retry_state)
+        if run_manager:
+            if isinstance(run_manager, AsyncCallbackManagerForLLMRun):
+                coro = run_manager.on_retry(retry_state)
+                try:
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        asyncio.run(coro)
+                    else:
+                        if loop.is_running():
+                            # TODO: Fix RUF006 - this task should have a reference
+                            #  and be awaited somewhere
+                            loop.create_task(coro)  # noqa: RUF006
+                        else:
+                            asyncio.run(coro)
+                except Exception as e:
+                    _log_error_once(f"Error in on_retry: {e}")
+            else:
+                run_manager.on_retry(retry_state)
+
+    min_seconds = 4
+    max_seconds = 10
+    # Wait 2^x * 1 second between each retry starting with
+    # 4 seconds, then up to 10 seconds, then 10 seconds afterwards
+    retry_instance: retry_base = retry_if_exception_type(error_types[0])
+    for error in error_types[1:]:
+        retry_instance |= retry_if_exception_type(error)
+    return retry(
+        reraise=True,
+        stop=stop_after_attempt(max_retries),
+        wait=wait_exponential(multiplier=1, min=min_seconds, max=max_seconds),
+        retry=retry_instance,
+        before_sleep=_before_sleep,
+    )
+
+
+def _resolve_cache(*, cache: BaseCache | bool | None) -> BaseCache | None:
+    """Resolve the cache."""
+    llm_cache: BaseCache | None
+    if isinstance(cache, BaseCache):
+        llm_cache = cache
+    elif cache is None:
+        llm_cache = get_llm_cache()
+    elif cache is True:
+        llm_cache = get_llm_cache()
+        if llm_cache is None:
+            msg = (
+                "No global cache was configured. Use `set_llm_cache`."
+                "to set a global cache if you want to use a global cache."
+                "Otherwise either pass a cache object or set cache to False/None"
+            )
+            raise ValueError(msg)
+    elif cache is False:
+        llm_cache = None
+    else:
+        msg = f"Unsupported cache value {cache}"
+        raise ValueError(msg)
+    return llm_cache
+
+
+def get_prompts(
+    params: dict[str, Any],
+    prompts: list[str],
+    cache: BaseCache | bool | None = None,  # noqa: FBT001
+) -> tuple[dict[int, list], str, list[int], list[str]]:
+    """Get prompts that are already cached.
+
+    Args:
+        params: Dictionary of parameters.
+        prompts: List of prompts.
+        cache: Cache object.
+
+    Returns:
+        A tuple of existing prompts, llm_string, missing prompt indexes,
+            and missing prompts.
+
+    Raises:
+        ValueError: If the cache is not set and cache is True.
+    """
+    llm_string = str(sorted(params.items()))
+    missing_prompts = []
+    missing_prompt_idxs = []
+    existing_prompts = {}
+
+    llm_cache = _resolve_cache(cache=cache)
+    for i, prompt in enumerate(prompts):
+        if llm_cache:
+            cache_val = llm_cache.lookup(prompt, llm_string)
+            if isinstance(cache_val, list):
+                existing_prompts[i] = cache_val
+            else:
+                missing_prompts.append(prompt)
+                missing_prompt_idxs.append(i)
+    return existing_prompts, llm_string, missing_prompt_idxs, missing_prompts
+
+
+async def aget_prompts(
+    params: dict[str, Any],
+    prompts: list[str],
+    cache: BaseCache | bool | None = None,  # noqa: FBT001
+) -> tuple[dict[int, list], str, list[int], list[str]]:
+    """Get prompts that are already cached. Async version.
+
+    Args:
+        params: Dictionary of parameters.
+        prompts: List of prompts.
+        cache: Cache object.
+
+    Returns:
+        A tuple of existing prompts, llm_string, missing prompt indexes,
+            and missing prompts.
+
+    Raises:
+        ValueError: If the cache is not set and cache is True.
+    """
+    llm_string = str(sorted(params.items()))
+    missing_prompts = []
+    missing_prompt_idxs = []
+    existing_prompts = {}
+    llm_cache = _resolve_cache(cache=cache)
+    for i, prompt in enumerate(prompts):
+        if llm_cache:
+            cache_val = await llm_cache.alookup(prompt, llm_string)
+            if isinstance(cache_val, list):
+                existing_prompts[i] = cache_val
+            else:
+                missing_prompts.append(prompt)
+                missing_prompt_idxs.append(i)
+    return existing_prompts, llm_string, missing_prompt_idxs, missing_prompts
+
+
+def update_cache(
+    cache: BaseCache | bool | None,  # noqa: FBT001
+    existing_prompts: dict[int, list],
+    llm_string: str,
+    missing_prompt_idxs: list[int],
+    new_results: LLMResult,
+    prompts: list[str],
+) -> dict | None:
+    """Update the cache and get the LLM output.
+
+    Args:
+        cache: Cache object.
+        existing_prompts: Dictionary of existing prompts.
+        llm_string: LLM string.
+        missing_prompt_idxs: List of missing prompt indexes.
+        new_results: LLMResult object.
+        prompts: List of prompts.
+
+    Returns:
+        LLM output.
+
+    Raises:
+        ValueError: If the cache is not set and cache is True.
+    """
+    llm_cache = _resolve_cache(cache=cache)
+    for i, result in enumerate(new_results.generations):
+        existing_prompts[missing_prompt_idxs[i]] = result
+        prompt = prompts[missing_prompt_idxs[i]]
+        if llm_cache is not None:
+            llm_cache.update(prompt, llm_string, result)
+    return new_results.llm_output
+
+
+async def aupdate_cache(
+    cache: BaseCache | bool | None,  # noqa: FBT001
+    existing_prompts: dict[int, list],
+    llm_string: str,
+    missing_prompt_idxs: list[int],
+    new_results: LLMResult,
+    prompts: list[str],
+) -> dict | None:
+    """Update the cache and get the LLM output. Async version.
+
+    Args:
+        cache: Cache object.
+        existing_prompts: Dictionary of existing prompts.
+        llm_string: LLM string.
+        missing_prompt_idxs: List of missing prompt indexes.
+        new_results: LLMResult object.
+        prompts: List of prompts.
+
+    Returns:
+        LLM output.
+
+    Raises:
+        ValueError: If the cache is not set and cache is True.
+    """
+    llm_cache = _resolve_cache(cache=cache)
+    for i, result in enumerate(new_results.generations):
+        existing_prompts[missing_prompt_idxs[i]] = result
+        prompt = prompts[missing_prompt_idxs[i]]
+        if llm_cache:
+            await llm_cache.aupdate(prompt, llm_string, result)
+    return new_results.llm_output
+
+
+class BaseLLM(BaseLanguageModel[str], ABC):
+    """Base LLM abstract interface.
+
+    It should take in a prompt and return a string.
+    """
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
+
+    @functools.cached_property
+    def _serialized(self) -> dict[str, Any]:
+        return dumpd(self)
+
+    # --- Runnable methods ---
+
+    @property
+    @override
+    def OutputType(self) -> type[str]:
+        """Get the input type for this `Runnable`."""
+        return str
+
+    def _convert_input(self, model_input: LanguageModelInput) -> PromptValue:
+        if isinstance(model_input, PromptValue):
+            return model_input
+        if isinstance(model_input, str):
+            return StringPromptValue(text=model_input)
+        if isinstance(model_input, Sequence):
+            return ChatPromptValue(messages=convert_to_messages(model_input))
+        msg = (
+            f"Invalid input type {type(model_input)}. "
+            "Must be a PromptValue, str, or list of BaseMessages."
+        )
+        raise ValueError(msg)
+
+    def _get_ls_params(
+        self,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> LangSmithParams:
+        """Get standard params for tracing."""
+        # get default provider from class name
+        default_provider = self.__class__.__name__
+        default_provider = default_provider.removesuffix("LLM")
+        default_provider = default_provider.lower()
+
+        ls_params = LangSmithParams(ls_provider=default_provider, ls_model_type="llm")
+        if stop:
+            ls_params["ls_stop"] = stop
+
+        # model
+        if "model" in kwargs and isinstance(kwargs["model"], str):
+            ls_params["ls_model_name"] = kwargs["model"]
+        elif hasattr(self, "model") and isinstance(self.model, str):
+            ls_params["ls_model_name"] = self.model
+        elif hasattr(self, "model_name") and isinstance(self.model_name, str):
+            ls_params["ls_model_name"] = self.model_name
+
+        # temperature
+        if "temperature" in kwargs and isinstance(kwargs["temperature"], float):
+            ls_params["ls_temperature"] = kwargs["temperature"]
+        elif hasattr(self, "temperature") and isinstance(self.temperature, float):
+            ls_params["ls_temperature"] = self.temperature
+
+        # max_tokens
+        if "max_tokens" in kwargs and isinstance(kwargs["max_tokens"], int):
+            ls_params["ls_max_tokens"] = kwargs["max_tokens"]
+        elif hasattr(self, "max_tokens") and isinstance(self.max_tokens, int):
+            ls_params["ls_max_tokens"] = self.max_tokens
+
+        return ls_params
+
+    @override
+    def invoke(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        config = ensure_config(config)
+        return (
+            self.generate_prompt(
+                [self._convert_input(input)],
+                stop=stop,
+                callbacks=config.get("callbacks"),
+                tags=config.get("tags"),
+                metadata=config.get("metadata"),
+                run_name=config.get("run_name"),
+                run_id=config.pop("run_id", None),
+                **kwargs,
+            )
+            .generations[0][0]
+            .text
+        )
+
+    @override
+    async def ainvoke(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        config = ensure_config(config)
+        llm_result = await self.agenerate_prompt(
+            [self._convert_input(input)],
+            stop=stop,
+            callbacks=config.get("callbacks"),
+            tags=config.get("tags"),
+            metadata=config.get("metadata"),
+            run_name=config.get("run_name"),
+            run_id=config.pop("run_id", None),
+            **kwargs,
+        )
+        return llm_result.generations[0][0].text
+
+    @override
+    def batch(
+        self,
+        inputs: list[LanguageModelInput],
+        config: RunnableConfig | list[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> list[str]:
+        if not inputs:
+            return []
+
+        config = get_config_list(config, len(inputs))
+        max_concurrency = config[0].get("max_concurrency")
+
+        if max_concurrency is None:
+            try:
+                llm_result = self.generate_prompt(
+                    [self._convert_input(input_) for input_ in inputs],
+                    callbacks=[c.get("callbacks") for c in config],
+                    tags=[c.get("tags") for c in config],
+                    metadata=[c.get("metadata") for c in config],
+                    run_name=[c.get("run_name") for c in config],
+                    **kwargs,
+                )
+                return [g[0].text for g in llm_result.generations]
+            except Exception as e:
+                if return_exceptions:
+                    return cast("list[str]", [e for _ in inputs])
+                raise
+        else:
+            batches = [
+                inputs[i : i + max_concurrency]
+                for i in range(0, len(inputs), max_concurrency)
+            ]
+            config = [{**c, "max_concurrency": None} for c in config]
+            return [
+                output
+                for i, batch in enumerate(batches)
+                for output in self.batch(
+                    batch,
+                    config=config[i * max_concurrency : (i + 1) * max_concurrency],
+                    return_exceptions=return_exceptions,
+                    **kwargs,
+                )
+            ]
+
+    @override
+    async def abatch(
+        self,
+        inputs: list[LanguageModelInput],
+        config: RunnableConfig | list[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> list[str]:
+        if not inputs:
+            return []
+        config = get_config_list(config, len(inputs))
+        max_concurrency = config[0].get("max_concurrency")
+
+        if max_concurrency is None:
+            try:
+                llm_result = await self.agenerate_prompt(
+                    [self._convert_input(input_) for input_ in inputs],
+                    callbacks=[c.get("callbacks") for c in config],
+                    tags=[c.get("tags") for c in config],
+                    metadata=[c.get("metadata") for c in config],
+                    run_name=[c.get("run_name") for c in config],
+                    **kwargs,
+                )
+                return [g[0].text for g in llm_result.generations]
+            except Exception as e:
+                if return_exceptions:
+                    return cast("list[str]", [e for _ in inputs])
+                raise
+        else:
+            batches = [
+                inputs[i : i + max_concurrency]
+                for i in range(0, len(inputs), max_concurrency)
+            ]
+            config = [{**c, "max_concurrency": None} for c in config]
+            return [
+                output
+                for i, batch in enumerate(batches)
+                for output in await self.abatch(
+                    batch,
+                    config=config[i * max_concurrency : (i + 1) * max_concurrency],
+                    return_exceptions=return_exceptions,
+                    **kwargs,
+                )
+            ]
+
+    @override
+    def stream(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        if type(self)._stream == BaseLLM._stream:  # noqa: SLF001
+            # model doesn't implement streaming, so use default implementation
+            yield self.invoke(input, config=config, stop=stop, **kwargs)
+        else:
+            prompt = self._convert_input(input).to_string()
+            config = ensure_config(config)
+            params = self.dict()
+            params["stop"] = stop
+            params = {**params, **kwargs}
+            options = {"stop": stop}
+            inheritable_metadata = {
+                **(config.get("metadata") or {}),
+                **self._get_ls_params(stop=stop, **kwargs),
+            }
+            callback_manager = CallbackManager.configure(
+                config.get("callbacks"),
+                self.callbacks,
+                self.verbose,
+                config.get("tags"),
+                self.tags,
+                inheritable_metadata,
+                self.metadata,
+            )
+            (run_manager,) = callback_manager.on_llm_start(
+                self._serialized,
+                [prompt],
+                invocation_params=params,
+                options=options,
+                name=config.get("run_name"),
+                run_id=config.pop("run_id", None),
+                batch_size=1,
+            )
+            generation: GenerationChunk | None = None
+            try:
+                for chunk in self._stream(
+                    prompt, stop=stop, run_manager=run_manager, **kwargs
+                ):
+                    yield chunk.text
+                    if generation is None:
+                        generation = chunk
+                    else:
+                        generation += chunk
+            except BaseException as e:
+                run_manager.on_llm_error(
+                    e,
+                    response=LLMResult(
+                        generations=[[generation]] if generation else []
+                    ),
+                )
+                raise
+
+            if generation is None:
+                err = ValueError("No generation chunks were returned")
+                run_manager.on_llm_error(err, response=LLMResult(generations=[]))
+                raise err
+
+            run_manager.on_llm_end(LLMResult(generations=[[generation]]))
+
+    @override
+    async def astream(
+        self,
+        input: LanguageModelInput,
+        config: RunnableConfig | None = None,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        if (
+            type(self)._astream is BaseLLM._astream  # noqa: SLF001
+            and type(self)._stream is BaseLLM._stream  # noqa: SLF001
+        ):
+            yield await self.ainvoke(input, config=config, stop=stop, **kwargs)
+            return
+
+        prompt = self._convert_input(input).to_string()
+        config = ensure_config(config)
+        params = self.dict()
+        params["stop"] = stop
+        params = {**params, **kwargs}
+        options = {"stop": stop}
+        inheritable_metadata = {
+            **(config.get("metadata") or {}),
+            **self._get_ls_params(stop=stop, **kwargs),
+        }
+        callback_manager = AsyncCallbackManager.configure(
+            config.get("callbacks"),
+            self.callbacks,
+            self.verbose,
+            config.get("tags"),
+            self.tags,
+            inheritable_metadata,
+            self.metadata,
+        )
+        (run_manager,) = await callback_manager.on_llm_start(
+            self._serialized,
+            [prompt],
+            invocation_params=params,
+            options=options,
+            name=config.get("run_name"),
+            run_id=config.pop("run_id", None),
+            batch_size=1,
+        )
+        generation: GenerationChunk | None = None
+        try:
+            async for chunk in self._astream(
+                prompt,
+                stop=stop,
+                run_manager=run_manager,
+                **kwargs,
+            ):
+                yield chunk.text
+                if generation is None:
+                    generation = chunk
+                else:
+                    generation += chunk
+        except BaseException as e:
+            await run_manager.on_llm_error(
+                e,
+                response=LLMResult(generations=[[generation]] if generation else []),
+            )
+            raise
+
+        if generation is None:
+            err = ValueError("No generation chunks were returned")
+            await run_manager.on_llm_error(err, response=LLMResult(generations=[]))
+            raise err
+
+        await run_manager.on_llm_end(LLMResult(generations=[[generation]]))
+
+    # --- Custom methods ---
+
+    @abstractmethod
+    def _generate(
+        self,
+        prompts: list[str],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Run the LLM on the given prompts.
+
+        Args:
+            prompts: The prompts to generate from.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+
+                If stop tokens are not supported consider raising `NotImplementedError`.
+            run_manager: Callback manager for the run.
+
+        Returns:
+            The LLM result.
+        """
+
+    async def _agenerate(
+        self,
+        prompts: list[str],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Run the LLM on the given prompts.
+
+        Args:
+            prompts: The prompts to generate from.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+
+                If stop tokens are not supported consider raising `NotImplementedError`.
+            run_manager: Callback manager for the run.
+
+        Returns:
+            The LLM result.
+        """
+        return await run_in_executor(
+            None,
+            self._generate,
+            prompts,
+            stop,
+            run_manager.get_sync() if run_manager else None,
+            **kwargs,
+        )
+
+    def _stream(
+        self,
+        prompt: str,
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[GenerationChunk]:
+        """Stream the LLM on the given prompt.
+
+        This method should be overridden by subclasses that support streaming.
+
+        If not implemented, the default behavior of calls to stream will be to
+        fallback to the non-streaming version of the model and return
+        the output as a single chunk.
+
+        Args:
+            prompt: The prompt to generate from.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+            run_manager: Callback manager for the run.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Yields:
+            Generation chunks.
+        """
+        raise NotImplementedError
+
+    async def _astream(
+        self,
+        prompt: str,
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[GenerationChunk]:
+        """An async version of the _stream method.
+
+        The default implementation uses the synchronous _stream method and wraps it in
+        an async iterator. Subclasses that need to provide a true async implementation
+        should override this method.
+
+        Args:
+            prompt: The prompt to generate from.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+            run_manager: Callback manager for the run.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Yields:
+            Generation chunks.
+        """
+        iterator = await run_in_executor(
+            None,
+            self._stream,
+            prompt,
+            stop,
+            run_manager.get_sync() if run_manager else None,
+            **kwargs,
+        )
+        done = object()
+        while True:
+            item = await run_in_executor(
+                None,
+                next,
+                iterator,
+                done,
+            )
+            if item is done:
+                break
+            yield item  # type: ignore[misc]
+
+    @override
+    def generate_prompt(
+        self,
+        prompts: list[PromptValue],
+        stop: list[str] | None = None,
+        callbacks: Callbacks | list[Callbacks] | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        prompt_strings = [p.to_string() for p in prompts]
+        return self.generate(prompt_strings, stop=stop, callbacks=callbacks, **kwargs)
+
+    @override
+    async def agenerate_prompt(
+        self,
+        prompts: list[PromptValue],
+        stop: list[str] | None = None,
+        callbacks: Callbacks | list[Callbacks] | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        prompt_strings = [p.to_string() for p in prompts]
+        return await self.agenerate(
+            prompt_strings, stop=stop, callbacks=callbacks, **kwargs
+        )
+
+    def _generate_helper(
+        self,
+        prompts: list[str],
+        stop: list[str] | None,
+        run_managers: list[CallbackManagerForLLMRun],
+        *,
+        new_arg_supported: bool,
+        **kwargs: Any,
+    ) -> LLMResult:
+        try:
+            output = (
+                self._generate(
+                    prompts,
+                    stop=stop,
+                    # TODO: support multiple run managers
+                    run_manager=run_managers[0] if run_managers else None,
+                    **kwargs,
+                )
+                if new_arg_supported
+                else self._generate(prompts, stop=stop)
+            )
+        except BaseException as e:
+            for run_manager in run_managers:
+                run_manager.on_llm_error(e, response=LLMResult(generations=[]))
+            raise
+        flattened_outputs = output.flatten()
+        for manager, flattened_output in zip(
+            run_managers, flattened_outputs, strict=False
+        ):
+            manager.on_llm_end(flattened_output)
+        if run_managers:
+            output.run = [
+                RunInfo(run_id=run_manager.run_id) for run_manager in run_managers
+            ]
+        return output
+
+    def generate(
+        self,
+        prompts: list[str],
+        stop: list[str] | None = None,
+        callbacks: Callbacks | list[Callbacks] | None = None,
+        *,
+        tags: list[str] | list[list[str]] | None = None,
+        metadata: dict[str, Any] | list[dict[str, Any]] | None = None,
+        run_name: str | list[str] | None = None,
+        run_id: uuid.UUID | list[uuid.UUID | None] | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Pass a sequence of prompts to a model and return generations.
+
+        This method should make use of batched calls for models that expose a batched
+        API.
+
+        Use this method when you want to:
+
+        1. Take advantage of batched calls,
+        2. Need more output from the model than just the top generated value,
+        3. Are building chains that are agnostic to the underlying language model
+            type (e.g., pure text completion models vs chat models).
+
+        Args:
+            prompts: List of string prompts.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+            callbacks: `Callbacks` to pass through.
+
+                Used for executing additional functionality, such as logging or
+                streaming, throughout generation.
+            tags: List of tags to associate with each prompt. If provided, the length
+                of the list must match the length of the prompts list.
+            metadata: List of metadata dictionaries to associate with each prompt. If
+                provided, the length of the list must match the length of the prompts
+                list.
+            run_name: List of run names to associate with each prompt. If provided, the
+                length of the list must match the length of the prompts list.
+            run_id: List of run IDs to associate with each prompt. If provided, the
+                length of the list must match the length of the prompts list.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Raises:
+            ValueError: If prompts is not a list.
+            ValueError: If the length of `callbacks`, `tags`, `metadata`, or
+                `run_name` (if provided) does not match the length of prompts.
+
+        Returns:
+            An `LLMResult`, which contains a list of candidate `Generations` for each
+                input prompt and additional model provider-specific output.
+        """
+        if not isinstance(prompts, list):
+            msg = (
+                "Argument 'prompts' is expected to be of type list[str], received"
+                f" argument of type {type(prompts)}."
+            )
+            raise ValueError(msg)  # noqa: TRY004
+        # Create callback managers
+        if isinstance(metadata, list):
+            metadata = [
+                {
+                    **(meta or {}),
+                    **self._get_ls_params(stop=stop, **kwargs),
+                }
+                for meta in metadata
+            ]
+        elif isinstance(metadata, dict):
+            metadata = {
+                **(metadata or {}),
+                **self._get_ls_params(stop=stop, **kwargs),
+            }
+        if (
+            isinstance(callbacks, list)
+            and callbacks
+            and (
+                isinstance(callbacks[0], (list, BaseCallbackManager))
+                or callbacks[0] is None
+            )
+        ):
+            # We've received a list of callbacks args to apply to each input
+            if len(callbacks) != len(prompts):
+                msg = "callbacks must be the same length as prompts"
+                raise ValueError(msg)
+            if tags is not None and not (
+                isinstance(tags, list) and len(tags) == len(prompts)
+            ):
+                msg = "tags must be a list of the same length as prompts"
+                raise ValueError(msg)
+            if metadata is not None and not (
+                isinstance(metadata, list) and len(metadata) == len(prompts)
+            ):
+                msg = "metadata must be a list of the same length as prompts"
+                raise ValueError(msg)
+            if run_name is not None and not (
+                isinstance(run_name, list) and len(run_name) == len(prompts)
+            ):
+                msg = "run_name must be a list of the same length as prompts"
+                raise ValueError(msg)
+            callbacks = cast("list[Callbacks]", callbacks)
+            tags_list = cast("list[list[str] | None]", tags or ([None] * len(prompts)))
+            metadata_list = cast(
+                "list[dict[str, Any] | None]", metadata or ([{}] * len(prompts))
+            )
+            run_name_list = run_name or cast(
+                "list[str | None]", ([None] * len(prompts))
+            )
+            callback_managers = [
+                CallbackManager.configure(
+                    callback,
+                    self.callbacks,
+                    self.verbose,
+                    tag,
+                    self.tags,
+                    meta,
+                    self.metadata,
+                )
+                for callback, tag, meta in zip(
+                    callbacks, tags_list, metadata_list, strict=False
+                )
+            ]
+        else:
+            # We've received a single callbacks arg to apply to all inputs
+            callback_managers = [
+                CallbackManager.configure(
+                    cast("Callbacks", callbacks),
+                    self.callbacks,
+                    self.verbose,
+                    cast("list[str]", tags),
+                    self.tags,
+                    cast("dict[str, Any]", metadata),
+                    self.metadata,
+                )
+            ] * len(prompts)
+            run_name_list = [cast("str | None", run_name)] * len(prompts)
+        run_ids_list = self._get_run_ids_list(run_id, prompts)
+        params = self.dict()
+        params["stop"] = stop
+        options = {"stop": stop}
+        (
+            existing_prompts,
+            llm_string,
+            missing_prompt_idxs,
+            missing_prompts,
+        ) = get_prompts(params, prompts, self.cache)
+        new_arg_supported = inspect.signature(self._generate).parameters.get(
+            "run_manager"
+        )
+        if (self.cache is None and get_llm_cache() is None) or self.cache is False:
+            run_managers = [
+                callback_manager.on_llm_start(
+                    self._serialized,
+                    [prompt],
+                    invocation_params=params,
+                    options=options,
+                    name=run_name,
+                    batch_size=len(prompts),
+                    run_id=run_id_,
+                )[0]
+                for callback_manager, prompt, run_name, run_id_ in zip(
+                    callback_managers,
+                    prompts,
+                    run_name_list,
+                    run_ids_list,
+                    strict=False,
+                )
+            ]
+            return self._generate_helper(
+                prompts,
+                stop,
+                run_managers,
+                new_arg_supported=bool(new_arg_supported),
+                **kwargs,
+            )
+        if len(missing_prompts) > 0:
+            run_managers = [
+                callback_managers[idx].on_llm_start(
+                    self._serialized,
+                    [prompts[idx]],
+                    invocation_params=params,
+                    options=options,
+                    name=run_name_list[idx],
+                    batch_size=len(missing_prompts),
+                )[0]
+                for idx in missing_prompt_idxs
+            ]
+            new_results = self._generate_helper(
+                missing_prompts,
+                stop,
+                run_managers,
+                new_arg_supported=bool(new_arg_supported),
+                **kwargs,
+            )
+            llm_output = update_cache(
+                self.cache,
+                existing_prompts,
+                llm_string,
+                missing_prompt_idxs,
+                new_results,
+                prompts,
+            )
+            run_info = (
+                [RunInfo(run_id=run_manager.run_id) for run_manager in run_managers]
+                if run_managers
+                else None
+            )
+        else:
+            llm_output = {}
+            run_info = None
+        generations = [existing_prompts[i] for i in range(len(prompts))]
+        return LLMResult(generations=generations, llm_output=llm_output, run=run_info)
+
+    @staticmethod
+    def _get_run_ids_list(
+        run_id: uuid.UUID | list[uuid.UUID | None] | None, prompts: list
+    ) -> list:
+        if run_id is None:
+            return [None] * len(prompts)
+        if isinstance(run_id, list):
+            if len(run_id) != len(prompts):
+                msg = (
+                    "Number of manually provided run_id's does not match batch length."
+                    f" {len(run_id)} != {len(prompts)}"
+                )
+                raise ValueError(msg)
+            return run_id
+        return [run_id] + [None] * (len(prompts) - 1)
+
+    async def _agenerate_helper(
+        self,
+        prompts: list[str],
+        stop: list[str] | None,
+        run_managers: list[AsyncCallbackManagerForLLMRun],
+        *,
+        new_arg_supported: bool,
+        **kwargs: Any,
+    ) -> LLMResult:
+        try:
+            output = (
+                await self._agenerate(
+                    prompts,
+                    stop=stop,
+                    run_manager=run_managers[0] if run_managers else None,
+                    **kwargs,
+                )
+                if new_arg_supported
+                else await self._agenerate(prompts, stop=stop)
+            )
+        except BaseException as e:
+            await asyncio.gather(
+                *[
+                    run_manager.on_llm_error(e, response=LLMResult(generations=[]))
+                    for run_manager in run_managers
+                ]
+            )
+            raise
+        flattened_outputs = output.flatten()
+        await asyncio.gather(
+            *[
+                run_manager.on_llm_end(flattened_output)
+                for run_manager, flattened_output in zip(
+                    run_managers, flattened_outputs, strict=False
+                )
+            ]
+        )
+        if run_managers:
+            output.run = [
+                RunInfo(run_id=run_manager.run_id) for run_manager in run_managers
+            ]
+        return output
+
+    async def agenerate(
+        self,
+        prompts: list[str],
+        stop: list[str] | None = None,
+        callbacks: Callbacks | list[Callbacks] | None = None,
+        *,
+        tags: list[str] | list[list[str]] | None = None,
+        metadata: dict[str, Any] | list[dict[str, Any]] | None = None,
+        run_name: str | list[str] | None = None,
+        run_id: uuid.UUID | list[uuid.UUID | None] | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        """Asynchronously pass a sequence of prompts to a model and return generations.
+
+        This method should make use of batched calls for models that expose a batched
+        API.
+
+        Use this method when you want to:
+
+        1. Take advantage of batched calls,
+        2. Need more output from the model than just the top generated value,
+        3. Are building chains that are agnostic to the underlying language model
+            type (e.g., pure text completion models vs chat models).
+
+        Args:
+            prompts: List of string prompts.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+            callbacks: `Callbacks` to pass through.
+
+                Used for executing additional functionality, such as logging or
+                streaming, throughout generation.
+            tags: List of tags to associate with each prompt. If provided, the length
+                of the list must match the length of the prompts list.
+            metadata: List of metadata dictionaries to associate with each prompt. If
+                provided, the length of the list must match the length of the prompts
+                list.
+            run_name: List of run names to associate with each prompt. If provided, the
+                length of the list must match the length of the prompts list.
+            run_id: List of run IDs to associate with each prompt. If provided, the
+                length of the list must match the length of the prompts list.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Raises:
+            ValueError: If the length of `callbacks`, `tags`, `metadata`, or
+                `run_name` (if provided) does not match the length of prompts.
+
+        Returns:
+            An `LLMResult`, which contains a list of candidate `Generations` for each
+                input prompt and additional model provider-specific output.
+        """
+        if isinstance(metadata, list):
+            metadata = [
+                {
+                    **(meta or {}),
+                    **self._get_ls_params(stop=stop, **kwargs),
+                }
+                for meta in metadata
+            ]
+        elif isinstance(metadata, dict):
+            metadata = {
+                **(metadata or {}),
+                **self._get_ls_params(stop=stop, **kwargs),
+            }
+        # Create callback managers
+        if isinstance(callbacks, list) and (
+            isinstance(callbacks[0], (list, BaseCallbackManager))
+            or callbacks[0] is None
+        ):
+            # We've received a list of callbacks args to apply to each input
+            if len(callbacks) != len(prompts):
+                msg = "callbacks must be the same length as prompts"
+                raise ValueError(msg)
+            if tags is not None and not (
+                isinstance(tags, list) and len(tags) == len(prompts)
+            ):
+                msg = "tags must be a list of the same length as prompts"
+                raise ValueError(msg)
+            if metadata is not None and not (
+                isinstance(metadata, list) and len(metadata) == len(prompts)
+            ):
+                msg = "metadata must be a list of the same length as prompts"
+                raise ValueError(msg)
+            if run_name is not None and not (
+                isinstance(run_name, list) and len(run_name) == len(prompts)
+            ):
+                msg = "run_name must be a list of the same length as prompts"
+                raise ValueError(msg)
+            callbacks = cast("list[Callbacks]", callbacks)
+            tags_list = cast("list[list[str] | None]", tags or ([None] * len(prompts)))
+            metadata_list = cast(
+                "list[dict[str, Any] | None]", metadata or ([{}] * len(prompts))
+            )
+            run_name_list = run_name or cast(
+                "list[str | None]", ([None] * len(prompts))
+            )
+            callback_managers = [
+                AsyncCallbackManager.configure(
+                    callback,
+                    self.callbacks,
+                    self.verbose,
+                    tag,
+                    self.tags,
+                    meta,
+                    self.metadata,
+                )
+                for callback, tag, meta in zip(
+                    callbacks, tags_list, metadata_list, strict=False
+                )
+            ]
+        else:
+            # We've received a single callbacks arg to apply to all inputs
+            callback_managers = [
+                AsyncCallbackManager.configure(
+                    cast("Callbacks", callbacks),
+                    self.callbacks,
+                    self.verbose,
+                    cast("list[str]", tags),
+                    self.tags,
+                    cast("dict[str, Any]", metadata),
+                    self.metadata,
+                )
+            ] * len(prompts)
+            run_name_list = [cast("str | None", run_name)] * len(prompts)
+        run_ids_list = self._get_run_ids_list(run_id, prompts)
+        params = self.dict()
+        params["stop"] = stop
+        options = {"stop": stop}
+        (
+            existing_prompts,
+            llm_string,
+            missing_prompt_idxs,
+            missing_prompts,
+        ) = await aget_prompts(params, prompts, self.cache)
+
+        # Verify whether the cache is set, and if the cache is set,
+        # verify whether the cache is available.
+        new_arg_supported = inspect.signature(self._agenerate).parameters.get(
+            "run_manager"
+        )
+        if (self.cache is None and get_llm_cache() is None) or self.cache is False:
+            run_managers = await asyncio.gather(
+                *[
+                    callback_manager.on_llm_start(
+                        self._serialized,
+                        [prompt],
+                        invocation_params=params,
+                        options=options,
+                        name=run_name,
+                        batch_size=len(prompts),
+                        run_id=run_id_,
+                    )
+                    for callback_manager, prompt, run_name, run_id_ in zip(
+                        callback_managers,
+                        prompts,
+                        run_name_list,
+                        run_ids_list,
+                        strict=False,
+                    )
+                ]
+            )
+            run_managers = [r[0] for r in run_managers]  # type: ignore[misc]
+            return await self._agenerate_helper(
+                prompts,
+                stop,
+                run_managers,  # type: ignore[arg-type]
+                new_arg_supported=bool(new_arg_supported),
+                **kwargs,
+            )
+        if len(missing_prompts) > 0:
+            run_managers = await asyncio.gather(
+                *[
+                    callback_managers[idx].on_llm_start(
+                        self._serialized,
+                        [prompts[idx]],
+                        invocation_params=params,
+                        options=options,
+                        name=run_name_list[idx],
+                        batch_size=len(missing_prompts),
+                    )
+                    for idx in missing_prompt_idxs
+                ]
+            )
+            run_managers = [r[0] for r in run_managers]  # type: ignore[misc]
+            new_results = await self._agenerate_helper(
+                missing_prompts,
+                stop,
+                run_managers,  # type: ignore[arg-type]
+                new_arg_supported=bool(new_arg_supported),
+                **kwargs,
+            )
+            llm_output = await aupdate_cache(
+                self.cache,
+                existing_prompts,
+                llm_string,
+                missing_prompt_idxs,
+                new_results,
+                prompts,
+            )
+            run_info = (
+                [RunInfo(run_id=run_manager.run_id) for run_manager in run_managers]  # type: ignore[attr-defined]
+                if run_managers
+                else None
+            )
+        else:
+            llm_output = {}
+            run_info = None
+        generations = [existing_prompts[i] for i in range(len(prompts))]
+        return LLMResult(generations=generations, llm_output=llm_output, run=run_info)
+
+    async def _call_async(
+        self,
+        prompt: str,
+        stop: list[str] | None = None,
+        callbacks: Callbacks = None,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Check Cache and run the LLM on the given prompt and input."""
+        result = await self.agenerate(
+            [prompt],
+            stop=stop,
+            callbacks=callbacks,
+            tags=tags,
+            metadata=metadata,
+            **kwargs,
+        )
+        return result.generations[0][0].text
+
+    def __str__(self) -> str:
+        """Return a string representation of the object for printing."""
+        cls_name = f"\033[1m{self.__class__.__name__}\033[0m"
+        return f"{cls_name}\nParams: {self._identifying_params}"
+
+    @property
+    @abstractmethod
+    def _llm_type(self) -> str:
+        """Return type of llm."""
+
+    @override
+    def dict(self, **kwargs: Any) -> dict:
+        """Return a dictionary of the LLM."""
+        starter_dict = dict(self._identifying_params)
+        starter_dict["_type"] = self._llm_type
+        return starter_dict
+
+    def save(self, file_path: Path | str) -> None:
+        """Save the LLM.
+
+        Args:
+            file_path: Path to file to save the LLM to.
+
+        Raises:
+            ValueError: If the file path is not a string or Path object.
+
+        Example:
+            ```python
+            llm.save(file_path="path/llm.yaml")
+            ```
+        """
+        # Convert file to Path object.
+        save_path = Path(file_path)
+
+        directory_path = save_path.parent
+        directory_path.mkdir(parents=True, exist_ok=True)
+
+        # Fetch dictionary to save
+        prompt_dict = self.dict()
+
+        if save_path.suffix == ".json":
+            with save_path.open("w", encoding="utf-8") as f:
+                json.dump(prompt_dict, f, indent=4)
+        elif save_path.suffix.endswith((".yaml", ".yml")):
+            with save_path.open("w", encoding="utf-8") as f:
+                yaml.dump(prompt_dict, f, default_flow_style=False)
+        else:
+            msg = f"{save_path} must be json or yaml"
+            raise ValueError(msg)
+
+
+class LLM(BaseLLM):
+    """Simple interface for implementing a custom LLM.
+
+    You should subclass this class and implement the following:
+
+    - `_call` method: Run the LLM on the given prompt and input (used by `invoke`).
+    - `_identifying_params` property: Return a dictionary of the identifying parameters
+        This is critical for caching and tracing purposes. Identifying parameters
+        is a dict that identifies the LLM.
+        It should mostly include a `model_name`.
+
+    Optional: Override the following methods to provide more optimizations:
+
+    - `_acall`: Provide a native async version of the `_call` method.
+        If not provided, will delegate to the synchronous version using
+        `run_in_executor`. (Used by `ainvoke`).
+    - `_stream`: Stream the LLM on the given prompt and input.
+        `stream` will use `_stream` if provided, otherwise it
+        use `_call` and output will arrive in one chunk.
+    - `_astream`: Override to provide a native async version of the `_stream` method.
+        `astream` will use `_astream` if provided, otherwise it will implement
+        a fallback behavior that will use `_stream` if `_stream` is implemented,
+        and use `_acall` if `_stream` is not implemented.
+    """
+
+    @abstractmethod
+    def _call(
+        self,
+        prompt: str,
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Run the LLM on the given input.
+
+        Override this method to implement the LLM logic.
+
+        Args:
+            prompt: The prompt to generate from.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+
+                If stop tokens are not supported consider raising `NotImplementedError`.
+            run_manager: Callback manager for the run.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Returns:
+            The model output as a string. SHOULD NOT include the prompt.
+        """
+
+    async def _acall(
+        self,
+        prompt: str,
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Async version of the _call method.
+
+        The default implementation delegates to the synchronous _call method using
+        `run_in_executor`. Subclasses that need to provide a true async implementation
+        should override this method to reduce the overhead of using `run_in_executor`.
+
+        Args:
+            prompt: The prompt to generate from.
+            stop: Stop words to use when generating.
+
+                Model output is cut off at the first occurrence of any of these
+                substrings.
+
+                If stop tokens are not supported consider raising `NotImplementedError`.
+            run_manager: Callback manager for the run.
+            **kwargs: Arbitrary additional keyword arguments.
+
+                These are usually passed to the model provider API call.
+
+        Returns:
+            The model output as a string. SHOULD NOT include the prompt.
+        """
+        return await run_in_executor(
+            None,
+            self._call,
+            prompt,
+            stop,
+            run_manager.get_sync() if run_manager else None,
+            **kwargs,
+        )
+
+    def _generate(
+        self,
+        prompts: list[str],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        # TODO: add caching here.
+        generations = []
+        new_arg_supported = inspect.signature(self._call).parameters.get("run_manager")
+        for prompt in prompts:
+            text = (
+                self._call(prompt, stop=stop, run_manager=run_manager, **kwargs)
+                if new_arg_supported
+                else self._call(prompt, stop=stop, **kwargs)
+            )
+            generations.append([Generation(text=text)])
+        return LLMResult(generations=generations)
+
+    async def _agenerate(
+        self,
+        prompts: list[str],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        generations = []
+        new_arg_supported = inspect.signature(self._acall).parameters.get("run_manager")
+        for prompt in prompts:
+            text = (
+                await self._acall(prompt, stop=stop, run_manager=run_manager, **kwargs)
+                if new_arg_supported
+                else await self._acall(prompt, stop=stop, **kwargs)
+            )
+            generations.append([Generation(text=text)])
+        return LLMResult(generations=generations)
+
+
+---
+### libs/core/langchain_core/language_models/model_profile.py
+
+"""Model profile types and utilities."""
+
+from typing_extensions import TypedDict
+
+
+class ModelProfile(TypedDict, total=False):
+    """Model profile.
+
+    !!! warning "Beta feature"
+        This is a beta feature. The format of model profiles is subject to change.
+
+    Provides information about chat model capabilities, such as context window sizes
+    and supported features.
+    """
+
+    # --- Input constraints ---
+
+    max_input_tokens: int
+    """Maximum context window (tokens)"""
+
+    image_inputs: bool
+    """Whether image inputs are supported."""
+    # TODO: add more detail about formats?
+
+    image_url_inputs: bool
+    """Whether [image URL inputs](https://docs.langchain.com/oss/python/langchain/models#multimodal)
+    are supported."""
+
+    pdf_inputs: bool
+    """Whether [PDF inputs](https://docs.langchain.com/oss/python/langchain/models#multimodal)
+    are supported."""
+    # TODO: add more detail about formats? e.g. bytes or base64
+
+    audio_inputs: bool
+    """Whether [audio inputs](https://docs.langchain.com/oss/python/langchain/models#multimodal)
+    are supported."""
+    # TODO: add more detail about formats? e.g. bytes or base64
+
+    video_inputs: bool
+    """Whether [video inputs](https://docs.langchain.com/oss/python/langchain/models#multimodal)
+    are supported."""
+    # TODO: add more detail about formats? e.g. bytes or base64
+
+    image_tool_message: bool
+    """Whether images can be included in tool messages."""
+
+    pdf_tool_message: bool
+    """Whether PDFs can be included in tool messages."""
+
+    # --- Output constraints ---
+
+    max_output_tokens: int
+    """Maximum output tokens"""
+
+    reasoning_output: bool
+    """Whether the model supports [reasoning / chain-of-thought](https://docs.langchain.com/oss/python/langchain/models#reasoning)"""
+
+    image_outputs: bool
+    """Whether [image outputs](https://docs.langchain.com/oss/python/langchain/models#multimodal)
+    are supported."""
+
+    audio_outputs: bool
+    """Whether [audio outputs](https://docs.langchain.com/oss/python/langchain/models#multimodal)
+    are supported."""
+
+    video_outputs: bool
+    """Whether [video outputs](https://docs.langchain.com/oss/python/langchain/models#multimodal)
+    are supported."""
+
+    # --- Tool calling ---
+    tool_calling: bool
+    """Whether the model supports [tool calling](https://docs.langchain.com/oss/python/langchain/models#tool-calling)"""
+
+    tool_choice: bool
+    """Whether the model supports [tool choice](https://docs.langchain.com/oss/python/langchain/models#forcing-tool-calls)"""
+
+    # --- Structured output ---
+    structured_output: bool
+    """Whether the model supports a native [structured output](https://docs.langchain.com/oss/python/langchain/models#structured-outputs)
+    feature"""
+
+
+ModelProfileRegistry = dict[str, ModelProfile]
+"""Registry mapping model identifiers or names to their ModelProfile."""
+
+
+---

@@ -1,0 +1,40 @@
+---
+description: LangChain custom chat model integration project conventions
+alwaysApply: true
+---
+
+# LangChain Custom Chat Model Integration
+
+## Overview
+
+This project creates custom LangChain chat model integrations that wrap proprietary or private LLM APIs while maintaining full compatibility with LangChain and LangGraph ecosystems.
+
+## Core Architecture
+
+✓ Inherit from `BaseChatModel` for full LangChain compatibility
+✓ Use Pydantic for configuration and validation
+✓ Implement async-first with sync fallbacks
+✓ Support callbacks for observability and tracing
+
+### Required Imports
+
+```python
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.callbacks import CallbackManagerForLLMRun, AsyncCallbackManagerForLLMRun
+```
+
+## Implementation Checklist
+
+✓ Implement `_generate()` method (required)
+✓ Define `_llm_type` property (required)
+✓ Implement `_agenerate()` for native async
+✓ Implement `_stream()` for streaming support
+✓ Implement `bind_tools()` for tool calling
+
+## See Also
+
+- [Custom Chat Model](mdc:langchain/custom-chat-model.mdc)
+- [Tool Calling](mdc:langchain/tool-calling.mdc)
+- [Streaming](mdc:langchain/streaming.mdc)

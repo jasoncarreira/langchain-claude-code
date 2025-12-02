@@ -1,0 +1,167 @@
+---
+description: StateGraph with ChatState/Context schemas, tool routing, multi-turn conversations
+alwaysApply: false
+---
+
+# LangGraph Integration
+
+## Overview
+
+LangGraph orchestrates multi-step LLM workflows with state management. Custom chat models integrate through typed state schemas, context injection, and tool routing.
+
+## State Schema Definition
+
+```python
+from typing import List, Annotated
+from pydantic import BaseModel
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
+
+class ChatState(BaseModel):
+    messages: Annotated[List[BaseMessage], add_messages]
+    system_prompt: str = "You are a helpful assistant."
+```
+
+## Context Schema Definition
+
+```python
+from pydantic import BaseModel, ConfigDict
+
+class ChatContext(BaseModel):
+    invoke_id: str
+    engine: str
+    conversation_id: str | None = None
+    message_history: list[dict] = []
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+```
+
+## Building a LangGraph Chat Flow
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.runtime import Runtime
+from langgraph.prebuilt import ToolNode
+from langchain_core.messages import AIMessage
+
+def make_chat_graph(tools: list) -> StateGraph:
+    
+    async def llm_node(state: ChatState, runtime: Runtime) -> dict:
+        context = runtime.context
+        
+        model = CustomChatModel(
+            engine=context.engine,
+            conversation_id=context.conversation_id
+        ).bind_tools(tools)
+        
+        ai_response = await model.ainvoke(
+            state.messages,
+            context=context
+        )
+        return {"messages": [ai_response]}
+    
+    def router(state: ChatState, runtime: Runtime) -> str:
+        last = state.messages[-1]
+        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+            return "tools"
+        return END
+    
+    def tool_node(state: ChatState, runtime: Runtime) -> dict:
+        return ToolNode(tools=tools).invoke(state)
+    
+    graph = StateGraph(state_schema=ChatState, context_schema=ChatContext)
+    graph.add_node("llm", llm_node)
+    graph.add_node("tools", tool_node)
+    graph.add_edge(START, "llm")
+    graph.add_conditional_edges("llm", router, {"tools": "tools", END: END})
+    graph.add_edge("tools", "llm")
+    
+    return graph.compile()
+```
+
+## Invoking the Graph
+
+```python
+import uuid
+
+context = ChatContext(
+    invoke_id=str(uuid.uuid4()),
+    engine="gpt-4o",
+    conversation_id="conv-123"
+)
+
+result = await graph.ainvoke(
+    {
+        "messages": [HumanMessage(content="What's 2 + 2?")],
+        "system_prompt": "You are a math tutor."
+    },
+    config={
+        "configurable": {"context": context},
+        "callbacks": [CustomAsyncHandler(context)]
+    }
+)
+```
+
+## Multi-Turn Conversation Pattern
+
+```python
+async def chat_loop(graph, context):
+    state = {"messages": [], "system_prompt": "You are helpful."}
+    
+    while True:
+        user_input = input("You: ")
+        if user_input == "exit":
+            break
+        
+        state["messages"].append(HumanMessage(content=user_input))
+        
+        result = await graph.ainvoke(
+            state,
+            config={"configurable": {"context": context}}
+        )
+        
+        state["messages"] = result["messages"]
+        print(f"AI: {state['messages'][-1].content}")
+```
+
+## Custom Model with Context Access
+
+```python
+class CustomChatModel(BaseChatModel):
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        context = kwargs.get("context")
+        
+        if context and context.message_history:
+            messages = context.message_history + messages
+        
+        response = await self._call_api(messages, **kwargs)
+        return ChatResult(generations=[ChatGeneration(message=response)])
+```
+
+## Tool Routing Logic
+
+```python
+def router(state: ChatState, runtime: Runtime) -> str:
+    last_message = state.messages[-1]
+    
+    if isinstance(last_message, AIMessage):
+        if getattr(last_message, "tool_calls", None):
+            return "tools"
+        if last_message.content.strip():
+            return END
+    
+    return "llm"
+```
+
+## When to Apply
+
+- Building multi-step agent workflows
+- Stateful conversation management
+- Tool-augmented reasoning
+- Complex orchestration patterns
+
+## See Also
+
+- [Custom Chat Model](mdc:langchain/custom-chat-model.mdc)
+- [Tool Calling](mdc:langchain/tool-calling.mdc)
+- [Callbacks](mdc:langchain/callbacks.mdc)

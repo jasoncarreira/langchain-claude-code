@@ -1,0 +1,186 @@
+---
+description: bind_tools, parse tool_calls from API, handle ToolMessage in conversations
+alwaysApply: false
+---
+# Tool Calling in Custom Chat Models
+
+## Overview
+
+Tool calling enables LLM to invoke external functions. Custom models parse tool call requests from the API response and format them as LangChain-compatible `AIMessage.tool_calls`.
+
+## bind_tools() Implementation
+
+```python
+from typing import Sequence, Dict, Any, Optional
+from langchain_core.tools import BaseTool
+from langchain_core.runnables import Runnable
+
+def bind_tools(
+    self,
+    tools: Sequence[BaseTool],
+    *,
+    tool_choice: Optional[str | Dict[str, Any]] = None
+) -> Runnable:
+    tool_specs = [self._convert_tool(tool) for tool in tools]
+    extra: Dict[str, Any] = {"tools": tool_specs}
+    if tool_choice is not None:
+        extra["tool_choice"] = tool_choice
+    return self.bind(**extra)
+
+def _convert_tool(self, tool: BaseTool) -> dict:
+    if getattr(tool, "args_schema", None):
+        schema = tool.args_schema.model_json_schema()
+    else:
+        schema = {"type": "object", "properties": {}, "required": []}
+    
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": schema
+        }
+    }
+```
+
+## Parsing Tool Calls from Response
+
+```python
+import json
+import uuid
+
+def _parse_tool_calls(self, raw_tool_calls: list) -> list[dict]:
+    parsed = []
+    for tc in raw_tool_calls:
+        if tc.get("type") == "function":
+            fn = tc.get("function", {})
+            try:
+                args = json.loads(fn.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                args = {"_raw": fn.get("arguments", "")}
+            
+            parsed.append({
+                "name": fn.get("name"),
+                "args": args,
+                "id": tc.get("id", str(uuid.uuid4()))
+            })
+    return parsed
+```
+
+## Creating AIMessage with Tool Calls
+
+```python
+def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+    response = self._call_api(messages, **kwargs)
+    
+    content = response.get("content", "")
+    tool_calls = self._parse_tool_calls(response.get("tool_calls", []))
+    
+    if tool_calls:
+        ai_message = AIMessage(content=content, tool_calls=tool_calls)
+    else:
+        ai_message = AIMessage(content=content)
+    
+    return ChatResult(generations=[ChatGeneration(message=ai_message)])
+```
+
+## Handling Tool Results in Messages
+
+```python
+def _prepare_messages(self, messages: list[BaseMessage]) -> list[dict]:
+    payload = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            payload.append({
+                "role": "tool",
+                "content": msg.content,
+                "tool_call_id": msg.tool_call_id,
+                "name": msg.name
+            })
+        elif isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            payload.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": json.dumps(call["args"])
+                        }
+                    }
+                    for call in msg.tool_calls
+                ]
+            })
+        else:
+            payload.append(self._convert_message(msg))
+    return payload
+```
+
+## LangGraph Tool Node Integration
+
+```python
+from langgraph.prebuilt import ToolNode
+
+def router(state):
+    last = state.messages[-1]
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        return "tools"
+    return END
+
+graph.add_node("tools", ToolNode(tools=my_tools))
+graph.add_conditional_edges("llm", router, {"tools": "tools", END: END})
+graph.add_edge("tools", "llm")
+```
+
+## Defining Tools
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def search(query: str) -> str:
+    """Search the web for information."""
+    return f"Results for: {query}"
+
+@tool
+def calculate(expression: str) -> float:
+    """Evaluate a mathematical expression."""
+    return eval(expression)
+```
+
+## Pitfall → Correct
+
+### Tool call ID must be preserved
+
+```python
+ai_message = AIMessage(
+    content="",
+    tool_calls=[{
+        "name": "search",
+        "args": {"query": "weather"},
+        "id": response["tool_calls"][0]["id"]
+    }]
+)
+```
+
+### Empty content when tool calls present
+
+```python
+if tool_calls:
+    content = ""
+message_dict["content"] = content
+```
+
+## When to Apply
+
+- LLM API supports function/tool calling
+- Building agentic workflows with LangGraph
+- Creating ReAct-style agents
+- Multi-step task automation
+
+## See Also
+
+- [Custom Chat Model](mdc:langchain/custom-chat-model.mdc)
+- [Streaming](mdc:langchain/streaming.mdc)

@@ -1,0 +1,89 @@
+---
+description: Claude Agent SDK Python overview - query(), ClaudeSDKClient, tools, hooks
+alwaysApply: false
+---
+
+# Claude Agent SDK (Python) Overview
+
+The Claude Agent SDK provides programmatic access to Claude Code's agentic capabilities. Build custom agents, integrate tools, and orchestrate complex workflows.
+
+## Installation
+
+```bash
+pip install claude-agent-sdk
+```
+
+Requires Python 3.10+. CLI is bundled automatically.
+
+## Core APIs
+
+| API | Use Case |
+|-----|----------|
+| `query()` | One-shot, stateless prompts |
+| `ClaudeSDKClient` | Multi-turn, interactive sessions |
+
+## Quick Example
+
+```python
+import anyio
+from claude_agent_sdk import query, AssistantMessage, TextBlock
+
+async def main():
+    async for message in query(prompt="What is 2 + 2?"):
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    print(block.text)
+
+anyio.run(main)
+```
+
+## Key Concepts
+
+1. **Async-First**: Use `anyio` or `asyncio` to run all SDK operations
+2. **Message Types**: Pattern match on `AssistantMessage`, `UserMessage`, `SystemMessage`, `ResultMessage`
+3. **Content Blocks**: Extract text via `TextBlock`, tool usage via `ToolUseBlock`
+4. **Options**: Configure via `ClaudeAgentOptions` dataclass
+
+## Rule Index
+
+| Rule | Description |
+|------|-------------|
+| [query](mdc:claude-sdk/query.mdc) | Simple one-shot queries |
+| [client](mdc:claude-sdk/client.mdc) | Interactive streaming client |
+| [tools](mdc:claude-sdk/tools.mdc) | Custom MCP tools |
+| [hooks](mdc:claude-sdk/hooks.mdc) | Hook system for control flow |
+| [agents](mdc:claude-sdk/agents.mdc) | Custom agent definitions |
+| [types](mdc:claude-sdk/types.mdc) | Message types and type safety |
+| [permissions](mdc:claude-sdk/permissions.mdc) | Permission callbacks and modes |
+
+## Imports Pattern
+
+```python
+from claude_agent_sdk import (
+    # Core APIs
+    query,
+    ClaudeSDKClient,
+    ClaudeAgentOptions,
+    # Message types
+    AssistantMessage,
+    UserMessage,
+    SystemMessage,
+    ResultMessage,
+    # Content blocks
+    TextBlock,
+    ToolUseBlock,
+    ToolResultBlock,
+    # Tools
+    tool,
+    create_sdk_mcp_server,
+    # Hooks
+    HookMatcher,
+    # Agents
+    AgentDefinition,
+    # Errors
+    ClaudeSDKError,
+    CLINotFoundError,
+    ProcessError,
+)
+```

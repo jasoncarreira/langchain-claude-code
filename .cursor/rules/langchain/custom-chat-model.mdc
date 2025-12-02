@@ -1,0 +1,154 @@
+---
+description: Inherit BaseChatModel, implement _generate/_llm_type, convert messages to API format
+alwaysApply: false
+---
+
+# Custom LangChain Chat Model
+
+## Overview
+
+Custom chat models inherit from `BaseChatModel` to integrate proprietary LLM APIs with LangChain. This enables compatibility with chains, agents, and LangGraph while maintaining full control over API communication.
+
+## Required Methods
+
+### `_generate()` - Core Generation (Required)
+
+```python
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.callbacks import CallbackManagerForLLMRun
+
+class CustomChatModel(BaseChatModel):
+    model: str
+    temperature: float = 0.7
+    
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs
+    ) -> ChatResult:
+        response = self._call_api(messages, stop=stop, **kwargs)
+        
+        ai_message = AIMessage(
+            content=response["content"],
+            tool_calls=response.get("tool_calls", [])
+        )
+        
+        generation = ChatGeneration(
+            message=ai_message,
+            generation_info={"raw": response}
+        )
+        return ChatResult(generations=[generation])
+```
+
+### `_llm_type` Property (Required)
+
+```python
+@property
+def _llm_type(self) -> str:
+    return "custom-api-chat"
+```
+
+## Optional Methods
+
+### `_agenerate()` - Native Async
+
+```python
+async def _agenerate(
+    self,
+    messages: list[BaseMessage],
+    stop: list[str] | None = None,
+    run_manager: AsyncCallbackManagerForLLMRun | None = None,
+    **kwargs
+) -> ChatResult:
+    response = await self._async_call_api(messages, stop=stop, **kwargs)
+    ai_message = AIMessage(content=response["content"])
+    return ChatResult(generations=[ChatGeneration(message=ai_message)])
+```
+
+### `_identifying_params` Property
+
+```python
+@property
+def _identifying_params(self) -> dict:
+    return {"model": self.model, "temperature": self.temperature}
+```
+
+## Message Conversion Pattern
+
+```python
+def _prepare_messages(self, messages: list[BaseMessage]) -> list[dict]:
+    payload = []
+    for msg in messages:
+        message_dict = {"content": msg.content or ""}
+        
+        if isinstance(msg, HumanMessage):
+            message_dict["role"] = "user"
+        elif isinstance(msg, AIMessage):
+            message_dict["role"] = "assistant"
+            if getattr(msg, "tool_calls", None):
+                message_dict["tool_calls"] = [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": json.dumps(call["args"])
+                        }
+                    }
+                    for call in msg.tool_calls
+                ]
+        elif isinstance(msg, SystemMessage):
+            message_dict["role"] = "system"
+        elif isinstance(msg, ToolMessage):
+            message_dict["role"] = "tool"
+            message_dict["tool_call_id"] = msg.tool_call_id
+            message_dict["name"] = msg.name
+        
+        payload.append(message_dict)
+    return payload
+```
+
+## Configuration with Pydantic
+
+```python
+from pydantic import Field, ConfigDict
+
+class CustomChatModel(BaseChatModel):
+    model: str = Field(description="Model identifier")
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    api_key: str = Field(exclude=True)
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+```
+
+## Pitfall → Correct
+
+### Return Type
+
+```python
+def _generate(...) -> ChatResult:
+    return ChatResult(generations=[ChatGeneration(message=ai_message)])
+```
+
+### Message ID Assignment
+
+```python
+if run_manager and ai_message.id is None:
+    ai_message.id = f"lc-{run_manager.run_id}"
+```
+
+## When to Apply
+
+- Creating wrapper for proprietary/private LLM API
+- Integrating custom authentication (OAuth, API keys)
+- Building LangGraph-compatible chat models
+- Wrapping enterprise internal models
+
+## See Also
+
+- [Tool Calling](mdc:langchain/tool-calling.mdc)
+- [Streaming](mdc:langchain/streaming.mdc)

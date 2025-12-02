@@ -1,0 +1,156 @@
+---
+description: _stream/_astream methods, yield ChatGenerationChunk, AIMessageChunk for tokens
+alwaysApply: false
+---
+
+# Streaming in Custom Chat Models
+
+## Overview
+
+Streaming enables real-time token-by-token output from LLMs. Implement `_stream()` for sync streaming and `_astream()` for async streaming. LangChain automatically falls back to non-streaming if streaming methods are not implemented.
+
+## `_stream()` - Sync Streaming
+
+```python
+from collections.abc import Iterator
+from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.messages import AIMessageChunk
+
+def _stream(
+    self,
+    messages: list[BaseMessage],
+    stop: list[str] | None = None,
+    run_manager: CallbackManagerForLLMRun | None = None,
+    **kwargs
+) -> Iterator[ChatGenerationChunk]:
+    response = self._call_streaming_api(messages, stop=stop, **kwargs)
+    
+    for chunk in response:
+        content = chunk.get("delta", {}).get("content", "")
+        if content:
+            message_chunk = AIMessageChunk(content=content)
+            yield ChatGenerationChunk(message=message_chunk)
+```
+
+## `_astream()` - Async Streaming
+
+```python
+from collections.abc import AsyncIterator
+
+async def _astream(
+    self,
+    messages: list[BaseMessage],
+    stop: list[str] | None = None,
+    run_manager: AsyncCallbackManagerForLLMRun | None = None,
+    **kwargs
+) -> AsyncIterator[ChatGenerationChunk]:
+    async for chunk in self._async_streaming_api(messages, stop=stop, **kwargs):
+        content = chunk.get("delta", {}).get("content", "")
+        if content:
+            message_chunk = AIMessageChunk(content=content)
+            yield ChatGenerationChunk(message=message_chunk)
+```
+
+## Streaming with Tool Calls
+
+```python
+async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+    tool_calls_buffer = []
+    
+    async for chunk in self._api_stream(messages, **kwargs):
+        delta = chunk.get("delta", {})
+        
+        if delta.get("content"):
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content=delta["content"])
+            )
+        
+        if delta.get("tool_calls"):
+            for tc_delta in delta["tool_calls"]:
+                idx = tc_delta.get("index", 0)
+                while len(tool_calls_buffer) <= idx:
+                    tool_calls_buffer.append({
+                        "id": "", "name": "", "args": ""
+                    })
+                
+                if tc_delta.get("id"):
+                    tool_calls_buffer[idx]["id"] = tc_delta["id"]
+                if tc_delta.get("function", {}).get("name"):
+                    tool_calls_buffer[idx]["name"] = tc_delta["function"]["name"]
+                if tc_delta.get("function", {}).get("arguments"):
+                    tool_calls_buffer[idx]["args"] += tc_delta["function"]["arguments"]
+    
+    if tool_calls_buffer:
+        parsed_calls = [
+            {
+                "id": tc["id"],
+                "name": tc["name"],
+                "args": json.loads(tc["args"]) if tc["args"] else {}
+            }
+            for tc in tool_calls_buffer
+        ]
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(content="", tool_calls=parsed_calls)
+        )
+```
+
+## Callback Integration
+
+```python
+def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+    for chunk in self._streaming_api(messages, **kwargs):
+        content = chunk.get("content", "")
+        message_chunk = AIMessageChunk(content=content)
+        generation_chunk = ChatGenerationChunk(message=message_chunk)
+        
+        if run_manager:
+            run_manager.on_llm_new_token(content, chunk=generation_chunk)
+        
+        yield generation_chunk
+```
+
+## Chunk Position Marking
+
+```python
+def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+    chunks = list(self._streaming_api(messages, **kwargs))
+    
+    for i, chunk in enumerate(chunks):
+        content = chunk.get("content", "")
+        chunk_position = "last" if i == len(chunks) - 1 else None
+        
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(
+                content=content,
+                chunk_position=chunk_position
+            )
+        )
+```
+
+## Pitfall → Correct
+
+### Yield ChatGenerationChunk (not AIMessageChunk directly)
+
+```python
+yield ChatGenerationChunk(message=AIMessageChunk(content=content))
+```
+
+### Handle empty chunks gracefully
+
+```python
+content = chunk.get("delta", {}).get("content", "")
+if content:
+    yield ChatGenerationChunk(message=AIMessageChunk(content=content))
+```
+
+## When to Apply
+
+- LLM API supports Server-Sent Events (SSE)
+- Building interactive chat interfaces
+- Long-running generation tasks
+- Real-time user feedback requirements
+
+## See Also
+
+- [Custom Chat Model](mdc:langchain/custom-chat-model.mdc)
+- [Tool Calling](mdc:langchain/tool-calling.mdc)

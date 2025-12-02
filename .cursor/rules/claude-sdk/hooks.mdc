@@ -1,0 +1,217 @@
+---
+description: HookMatcher, PreToolUse, PostToolUse hooks for agent control flow
+alwaysApply: false
+---
+
+# Hooks - Agent Control Flow
+
+Hooks are Python functions invoked at specific points in the Claude agent loop. They provide deterministic processing and automated feedback.
+
+## Supported Hook Events
+
+| Event | Trigger |
+|-------|---------|
+| `PreToolUse` | Before tool execution |
+| `PostToolUse` | After tool execution |
+| `UserPromptSubmit` | When user submits prompt |
+| `Stop` | When agent stops |
+| `SubagentStop` | When subagent stops |
+| `PreCompact` | Before context compaction |
+
+## Basic Hook Structure
+
+```python
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
+from claude_agent_sdk.types import HookInput, HookContext, HookJSONOutput
+
+async def my_hook(
+    input_data: HookInput,
+    tool_use_id: str | None,
+    context: HookContext
+) -> HookJSONOutput:
+    # Process and return output
+    return {}
+
+options = ClaudeAgentOptions(
+    hooks={
+        "PreToolUse": [
+            HookMatcher(matcher="Bash", hooks=[my_hook]),
+        ],
+    }
+)
+```
+
+## PreToolUse: Block Dangerous Commands
+
+```python
+async def check_bash_command(
+    input_data: HookInput,
+    tool_use_id: str | None,
+    context: HookContext
+) -> HookJSONOutput:
+    tool_name = input_data["tool_name"]
+    tool_input = input_data["tool_input"]
+
+    if tool_name != "Bash":
+        return {}
+
+    command = tool_input.get("command", "")
+    dangerous_patterns = ["rm -rf", "sudo", "chmod 777"]
+
+    for pattern in dangerous_patterns:
+        if pattern in command:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": f"Blocked dangerous pattern: {pattern}",
+                }
+            }
+    return {}
+
+options = ClaudeAgentOptions(
+    allowed_tools=["Bash"],
+    hooks={
+        "PreToolUse": [
+            HookMatcher(matcher="Bash", hooks=[check_bash_command]),
+        ],
+    }
+)
+```
+
+## PreToolUse: Modify Tool Input
+
+```python
+async def redirect_writes(
+    input_data: HookInput,
+    tool_use_id: str | None,
+    context: HookContext
+) -> HookJSONOutput:
+    if input_data["tool_name"] != "Write":
+        return {}
+
+    file_path = input_data["tool_input"].get("file_path", "")
+    if not file_path.startswith("/tmp/"):
+        safe_path = f"/tmp/safe/{file_path.split('/')[-1]}"
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": {**input_data["tool_input"], "file_path": safe_path}
+            }
+        }
+    return {}
+```
+
+## PostToolUse: Add Context
+
+```python
+async def log_tool_result(
+    input_data: HookInput,
+    tool_use_id: str | None,
+    context: HookContext
+) -> HookJSONOutput:
+    tool_name = input_data["tool_name"]
+    tool_response = input_data.get("tool_response")
+    
+    # Log for monitoring
+    print(f"Tool {tool_name} completed: {tool_response}")
+    
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": f"Tool {tool_name} executed successfully"
+        }
+    }
+
+options = ClaudeAgentOptions(
+    hooks={
+        "PostToolUse": [
+            HookMatcher(matcher="Bash|Write|Edit", hooks=[log_tool_result]),
+        ],
+    }
+)
+```
+
+## UserPromptSubmit: Validate Input
+
+```python
+async def validate_prompt(
+    input_data: HookInput,
+    tool_use_id: str | None,
+    context: HookContext
+) -> HookJSONOutput:
+    prompt = input_data.get("prompt", "")
+    
+    if "password" in prompt.lower():
+        return {
+            "decision": "block",
+            "reason": "Prompt contains sensitive information"
+        }
+    
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": "Prompt validated"
+        }
+    }
+```
+
+## Hook Output Reference
+
+### PreToolUse Output
+
+```python
+{
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "allow" | "deny" | "ask",
+        "permissionDecisionReason": "...",
+        "updatedInput": {...}  # Modified tool input
+    }
+}
+```
+
+### PostToolUse Output
+
+```python
+{
+    "hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": "..."  # Feedback to Claude
+    }
+}
+```
+
+### Control Fields
+
+```python
+{
+    "continue_": False,      # Stop agent execution
+    "stopReason": "...",     # Message when stopping
+    "suppressOutput": True,  # Hide from transcript
+}
+```
+
+## Matcher Patterns
+
+```python
+# Single tool
+HookMatcher(matcher="Bash", hooks=[...])
+
+# Multiple tools (pipe-separated)
+HookMatcher(matcher="Write|Edit|MultiEdit", hooks=[...])
+
+# All tools (None matcher)
+HookMatcher(matcher=None, hooks=[...])
+```
+
+## Timeout Configuration
+
+```python
+HookMatcher(
+    matcher="Bash",
+    hooks=[my_hook],
+    timeout=30.0  # 30 seconds (default: 60)
+)
+```

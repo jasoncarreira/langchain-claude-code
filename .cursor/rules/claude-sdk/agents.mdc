@@ -1,0 +1,174 @@
+---
+description: AgentDefinition for custom agents with specific roles, tools, models
+alwaysApply: false
+---
+
+# Custom Agents
+
+Define specialized agents with specific personas, tools, and models using `AgentDefinition`.
+
+## Basic Agent Definition
+
+```python
+from claude_agent_sdk import ClaudeAgentOptions, AgentDefinition, query
+
+options = ClaudeAgentOptions(
+    agents={
+        "code-reviewer": AgentDefinition(
+            description="Reviews code for best practices and issues",
+            prompt="You are a code reviewer. Analyze code for bugs, "
+                   "performance issues, and security vulnerabilities.",
+            tools=["Read", "Grep"],
+            model="sonnet",
+        ),
+    },
+)
+
+async for message in query(
+    prompt="Use the code-reviewer agent to review src/main.py",
+    options=options,
+):
+    print(message)
+```
+
+## AgentDefinition Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `description` | `str` | Short description for agent selection |
+| `prompt` | `str` | System prompt defining agent behavior |
+| `tools` | `list[str]` | Tools available to this agent |
+| `model` | `str` | Model: `"sonnet"`, `"opus"`, `"haiku"`, `"inherit"` |
+
+## Multiple Agents
+
+```python
+options = ClaudeAgentOptions(
+    agents={
+        "analyzer": AgentDefinition(
+            description="Analyzes code structure and patterns",
+            prompt="You are a code analyzer. Examine code structure, "
+                   "patterns, and architecture.",
+            tools=["Read", "Grep", "Glob"],
+        ),
+        "tester": AgentDefinition(
+            description="Creates and runs tests",
+            prompt="You are a testing expert. Write comprehensive tests "
+                   "and ensure code quality.",
+            tools=["Read", "Write", "Bash"],
+            model="sonnet",
+        ),
+        "doc-writer": AgentDefinition(
+            description="Writes technical documentation",
+            prompt="You are a technical documentation expert. Write clear, "
+                   "comprehensive documentation with examples.",
+            tools=["Read", "Write", "Edit"],
+            model="sonnet",
+        ),
+    },
+)
+```
+
+## Invoking Agents
+
+Prompt Claude to use specific agents:
+
+```python
+# Use the code-reviewer agent
+async for msg in query(
+    prompt="Use the code-reviewer agent to review the authentication module",
+    options=options,
+):
+    print(msg)
+
+# Use the tester agent
+async for msg in query(
+    prompt="Use the tester agent to create unit tests for utils.py",
+    options=options,
+):
+    print(msg)
+```
+
+## Agent with Setting Sources
+
+Control which settings are loaded with the agent:
+
+```python
+options = ClaudeAgentOptions(
+    agents={
+        "analyzer": AgentDefinition(
+            description="Analyzes codebase",
+            prompt="You analyze code structure.",
+            tools=["Read", "Grep", "Glob"],
+        ),
+    },
+    setting_sources=["user", "project"],  # Load user and project settings
+)
+```
+
+Setting sources:
+
+- `"user"`: Global user settings (`~/.claude/`)
+- `"project"`: Project-level settings (`.claude/` in project)
+- `"local"`: Local gitignored settings (`.claude-local/`)
+
+## Agent Models
+
+```python
+AgentDefinition(
+    description="...",
+    prompt="...",
+    model="sonnet",   # Use Claude Sonnet
+    # model="opus",   # Use Claude Opus
+    # model="haiku",  # Use Claude Haiku
+    # model="inherit" # Inherit from parent
+)
+```
+
+## Example: Specialized Workflow
+
+```python
+from claude_agent_sdk import ClaudeAgentOptions, AgentDefinition, ClaudeSDKClient
+
+options = ClaudeAgentOptions(
+    agents={
+        "planner": AgentDefinition(
+            description="Plans implementation approach",
+            prompt="You are a software architect. Analyze requirements "
+                   "and create implementation plans.",
+            tools=["Read", "Grep"],
+            model="opus",
+        ),
+        "implementer": AgentDefinition(
+            description="Implements code changes",
+            prompt="You are an expert developer. Write clean, efficient code "
+                   "following best practices.",
+            tools=["Read", "Write", "Edit", "Bash"],
+            model="sonnet",
+        ),
+        "reviewer": AgentDefinition(
+            description="Reviews implementation",
+            prompt="You are a code reviewer. Check for bugs, security issues, "
+                   "and adherence to standards.",
+            tools=["Read", "Grep"],
+            model="sonnet",
+        ),
+    },
+)
+
+async with ClaudeSDKClient(options=options) as client:
+    # Step 1: Plan
+    await client.query("Use the planner agent to plan adding user auth")
+    async for msg in client.receive_response():
+        print(msg)
+
+    # Step 2: Implement
+    await client.query("Use the implementer agent to implement the plan")
+    async for msg in client.receive_response():
+        print(msg)
+
+    # Step 3: Review
+    await client.query("Use the reviewer agent to review the implementation")
+    async for msg in client.receive_response():
+        print(msg)
+```
