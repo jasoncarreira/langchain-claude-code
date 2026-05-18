@@ -42,6 +42,54 @@ from claude_agent_sdk import (
 from langchain_claude_code.claude_code_tools import ClaudeTool, normalize_tools
 
 
+def _generation_info_from_result(msg: "ResultMessage") -> dict[str, Any]:
+    """Build a ``generation_info`` dict from an SDK ``ResultMessage``.
+
+    Mirrors the SDK's per-request metadata onto LangChain's
+    ``generation_info`` so downstream consumers can read it off the
+    final AIMessage's ``response_metadata``. Used by both ``_generate``
+    (non-streaming) and ``_astream`` (streaming) so the two paths
+    surface the same field set — previously they diverged: the
+    non-streaming path preserved ``num_turns`` / ``is_error`` but
+    missed ``finish_reason``, while the streaming path emitted
+    ``finish_reason`` but dropped ``num_turns`` / ``is_error``
+    entirely. Neither path preserved ``stop_reason``.
+
+    Field shape (all keys present unless explicitly noted):
+
+      - ``total_cost_usd``, ``duration_ms``, ``duration_api_ms``,
+        ``session_id``                              — SDK fields
+      - ``num_turns``, ``is_error``                 — SDK fields
+      - ``finish_reason``                           — LangChain
+        convention; ``"error"`` when ``msg.is_error`` else ``"stop"``
+      - ``stop_reason``                             — granular SDK
+        reason (``"end_turn"``, ``"max_turns"``, ``"max_tokens"``,
+        etc.); only included when present (newer SDK only) AND
+        non-``None``. Access is ``getattr``-guarded so the helper
+        works on the SDK ``>= 0.1.10`` floor this package declares.
+      - ``usage``                                   — only when
+        ``msg.usage`` is non-empty
+    """
+    info: dict[str, Any] = {
+        "total_cost_usd": msg.total_cost_usd,
+        "duration_ms": msg.duration_ms,
+        "duration_api_ms": msg.duration_api_ms,
+        "session_id": msg.session_id,
+        "num_turns": msg.num_turns,
+        "is_error": msg.is_error,
+        "finish_reason": "error" if msg.is_error else "stop",
+    }
+    # ``stop_reason`` was added to ResultMessage in a later SDK
+    # release; use getattr so the helper stays compatible with the
+    # >= 0.1.10 floor pinned in pyproject.toml.
+    stop_reason = getattr(msg, "stop_reason", None)
+    if stop_reason is not None:
+        info["stop_reason"] = stop_reason
+    if msg.usage:
+        info["usage"] = msg.usage
+    return info
+
+
 class ClaudeCodeChatModel(BaseChatModel):
     """LangChain chat model wrapping Claude Code Agent SDK. 
     
@@ -341,16 +389,7 @@ class ClaudeCodeChatModel(BaseChatModel):
 
                 elif isinstance(msg, ResultMessage):
                     self._last_result = msg
-                    generation_info = {
-                        "total_cost_usd": msg.total_cost_usd,
-                        "duration_ms": msg.duration_ms,
-                        "duration_api_ms": msg.duration_api_ms,
-                        "num_turns": msg.num_turns,
-                        "session_id": msg.session_id,
-                        "is_error": msg.is_error,
-                    }
-                    if msg.usage:
-                        generation_info["usage"] = msg.usage
+                    generation_info = _generation_info_from_result(msg)
 
         captured = self._tool_results_var.get()
         if captured:
@@ -503,15 +542,9 @@ class ClaudeCodeChatModel(BaseChatModel):
                 elif isinstance(msg, ResultMessage):
                     self._last_result = msg
 
-                    generation_info: dict[str, Any] = {
-                        "total_cost_usd": msg.total_cost_usd,
-                        "duration_ms": msg.duration_ms,
-                        "duration_api_ms": msg.duration_api_ms,
-                        "session_id": msg.session_id,
-                        "finish_reason": "stop" if not msg.is_error else "error",
-                    }
-                    if msg.usage:
-                        generation_info["usage"] = msg.usage
+                    generation_info: dict[str, Any] = (
+                        _generation_info_from_result(msg)
+                    )
                     if tool_calls_buffer:
                         generation_info["internal_tool_calls"] = tool_calls_buffer
                     if tool_results_buffer:

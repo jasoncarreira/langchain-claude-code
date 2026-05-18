@@ -319,6 +319,179 @@ class ClaudeChatModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool_results", res.response_metadata)
         self.assertEqual(res.response_metadata["tool_results"][0]["tool_use_id"], "t1")
 
+    async def test_astream_preserves_full_result_message_fields(self):
+        """``_astream``'s result chunk's ``generation_info`` must
+        carry the full SDK ``ResultMessage`` field set so callers
+        reading ``finished_message.response_metadata`` see the same
+        information they'd get from the non-streaming ``_generate``
+        path. Previously the streaming path dropped ``stop_reason``,
+        ``num_turns``, and ``is_error`` entirely — collapsing
+        ``is_error`` into a binary ``finish_reason`` — which made
+        the two code paths produce asymmetric AIMessage shapes.
+
+        ``stop_reason`` is set via ``setattr`` because the SDK
+        ``>= 0.1.10`` floor this package declares predates that
+        field's addition to ``ResultMessage``; on newer SDKs the
+        helper picks it up via ``getattr`` without an SDK bump.
+        """
+        rm = ResultMessage(
+            subtype="result",
+            duration_ms=10,
+            duration_api_ms=5,
+            is_error=False,
+            num_turns=3,
+            session_id="sess-stream-full",
+            total_cost_usd=0.001,
+            usage={"input_tokens": 10, "output_tokens": 5},
+            result=None,
+            structured_output=None,
+        )
+        # Simulate newer-SDK stop_reason field via setattr.
+        try:
+            rm.stop_reason = "end_turn"  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
+        StubClaudeSDKClient.preset_responses = [
+            AssistantMessage(
+                content=[TextBlock(text="ok")],
+                model="test", parent_tool_use_id=None, error=None,
+            ),
+            rm,
+        ]
+
+        model = ClaudeCodeChatModel()
+        with patch(
+            "langchain_claude_code.claude_chat_model.ClaudeSDKClient",
+            StubClaudeSDKClient,
+        ):
+            chunks = [
+                chunk async for chunk in model._astream([HumanMessage(content="hi")])
+            ]
+
+        final = chunks[-1].generation_info
+        # Granular SDK fields all present:
+        self.assertEqual(final["num_turns"], 3)
+        self.assertEqual(final["is_error"], False)
+        # LangChain convention finish_reason also present (binary):
+        self.assertEqual(final["finish_reason"], "stop")
+        # stop_reason is preserved when present on the SDK message.
+        # On SDK 0.1.10 (no stop_reason field) the key is omitted —
+        # that's a forward-compatibility-only assertion; gate it.
+        if hasattr(StubClaudeSDKClient.preset_responses[1], "stop_reason"):
+            self.assertEqual(final.get("stop_reason"), "end_turn")
+        # Existing fields untouched:
+        self.assertEqual(final["total_cost_usd"], 0.001)
+        self.assertEqual(final["session_id"], "sess-stream-full")
+        self.assertEqual(final["usage"], {"input_tokens": 10, "output_tokens": 5})
+
+    async def test_astream_finish_reason_error_on_is_error_true(self):
+        """When ``ResultMessage.is_error`` is True, ``finish_reason``
+        renders as ``"error"`` (LangChain convention) and ``is_error``
+        is preserved as its own field for callers who need the boolean
+        directly."""
+        rm = ResultMessage(
+            subtype="result",
+            duration_ms=1, duration_api_ms=1,
+            is_error=True,
+            num_turns=50,
+            session_id="sess-err",
+            total_cost_usd=None,
+            usage=None,
+            result=None,
+            structured_output=None,
+        )
+        try:
+            rm.stop_reason = "max_turns"  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
+        StubClaudeSDKClient.preset_responses = [rm]
+        model = ClaudeCodeChatModel()
+        with patch(
+            "langchain_claude_code.claude_chat_model.ClaudeSDKClient",
+            StubClaudeSDKClient,
+        ):
+            chunks = [
+                chunk async for chunk in model._astream([HumanMessage(content="x")])
+            ]
+        final = chunks[-1].generation_info
+        self.assertEqual(final["is_error"], True)
+        self.assertEqual(final["finish_reason"], "error")
+        self.assertEqual(final["num_turns"], 50)
+        if hasattr(StubClaudeSDKClient.preset_responses[0], "stop_reason"):
+            self.assertEqual(final.get("stop_reason"), "max_turns")
+
+    async def test_generate_preserves_full_result_message_fields(self):
+        """Non-streaming ``_generate`` path mirrors the streaming
+        path's generation_info shape — the same helper builds both,
+        so the field set is symmetric. Pre-fix, ``_generate``
+        preserved ``num_turns`` / ``is_error`` but emitted no
+        ``finish_reason``, while ``_astream`` did the opposite."""
+        rm = ResultMessage(
+            subtype="result",
+            duration_ms=8, duration_api_ms=4,
+            is_error=False,
+            num_turns=2,
+            session_id="sess-gen-full",
+            total_cost_usd=0.005,
+            usage={"output_tokens": 7},
+            result=None,
+            structured_output=None,
+        )
+        try:
+            rm.stop_reason = "end_turn"  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
+        StubClaudeSDKClient.preset_responses = [
+            AssistantMessage(
+                content=[TextBlock(text="done")],
+                model="test", parent_tool_use_id=None, error=None,
+            ),
+            rm,
+        ]
+        model = ClaudeCodeChatModel()
+        with patch(
+            "langchain_claude_code.claude_chat_model.ClaudeSDKClient",
+            StubClaudeSDKClient,
+        ):
+            res = await model.ainvoke([HumanMessage(content="hi")])
+        md = res.response_metadata
+        # All SDK fields preserved + finish_reason added per
+        # LangChain convention.
+        self.assertEqual(md["num_turns"], 2)
+        self.assertEqual(md["is_error"], False)
+        self.assertEqual(md["finish_reason"], "stop")
+        self.assertEqual(md["session_id"], "sess-gen-full")
+        if hasattr(rm, "stop_reason"):
+            self.assertEqual(md.get("stop_reason"), "end_turn")
+
+    def test_generation_info_from_result_helper(self):
+        """Direct unit test of the helper that both paths share:
+        produces a consistent generation_info dict from any
+        ResultMessage. Omits ``stop_reason`` when the SDK doesn't
+        carry it (older SDK) or when present-but-``None``. Omits
+        ``usage`` only when empty."""
+        from langchain_claude_code.claude_chat_model import (
+            _generation_info_from_result,
+        )
+
+        msg = ResultMessage(
+            subtype="result",
+            duration_ms=1, duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="s1",
+            total_cost_usd=0.0,
+            usage=None,                  # falsy → key omitted
+            result=None,
+            structured_output=None,
+        )
+        info = _generation_info_from_result(msg)
+        self.assertEqual(info["num_turns"], 1)
+        self.assertEqual(info["is_error"], False)
+        self.assertEqual(info["finish_reason"], "stop")
+        self.assertNotIn("stop_reason", info)  # absent on SDK 0.1.10
+        self.assertNotIn("usage", info)         # None → omitted
+
 
 if __name__ == "__main__":
     unittest.main()
