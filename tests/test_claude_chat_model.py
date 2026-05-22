@@ -224,6 +224,62 @@ class ClaudeChatModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("langchain-tools", client.options.mcp_servers)
         self.assertIn("mcp__langchain-tools__echo", client.options.allowed_tools)
 
+    def test_bind_tools_skips_runtime_injected_args(self):
+        """Tools whose underlying function takes a langgraph-injected
+        parameter (notably ``ToolRuntime``) can't be bridged through
+        MCP — the bridge calls ``tool._arun(**args)`` directly and
+        the injection argument never gets populated. Such tools
+        should be filtered out of the MCP allowlist; the framework's
+        native tool path still serves them.
+
+        The deepagents filesystem middleware's ``read_file`` tool is
+        the motivating real-world case — it has signature
+        ``async def async_read_file(file_path, runtime: ToolRuntime[...],
+        ...)`` and was producing ``missing 1 required positional
+        argument: 'runtime'`` on every invocation through the bridge.
+        """
+        try:
+            from langgraph.prebuilt.tool_node import ToolRuntime
+        except ImportError:
+            self.skipTest("langgraph not installed")
+
+        class InjectedTool(BaseTool):
+            name: str = "needs_runtime"
+            description: str = "tool that takes ToolRuntime injection"
+
+            def _run(self, runtime: ToolRuntime[Any, dict[str, Any]], path: str = "") -> str:  # noqa: ARG002
+                return path  # pragma: no cover
+
+        class PlainTool(BaseTool):
+            name: str = "echo"
+            description: str = "plain tool, no injection"
+
+            def _run(self, text: str = "hi") -> str:
+                return text  # pragma: no cover
+
+        from langchain_claude_code.claude_chat_model import (
+            _has_runtime_injected_args,
+        )
+        # Detection at the underlying helper level.
+        self.assertTrue(_has_runtime_injected_args(InjectedTool()))
+        self.assertFalse(_has_runtime_injected_args(PlainTool()))
+
+        # Detection wired into bind_tools — only the plain tool lands
+        # in the allowlist; the injected one is silently skipped.
+        # ``bind_tools`` returns a RunnableBinding(bound=ModelCopy,
+        # kwargs=...) so allowlist mutations live on ``bound.bound``.
+        model = ClaudeCodeChatModel()
+        bound = model.bind_tools([InjectedTool(), PlainTool()])
+        underlying = bound.bound
+        self.assertNotIn(
+            "mcp__langchain-tools__needs_runtime",
+            underlying.allowed_tools,
+        )
+        self.assertIn(
+            "mcp__langchain-tools__echo",
+            underlying.allowed_tools,
+        )
+
     def test_generate_uses_asyncio_run_when_no_loop(self):
         model = ClaudeCodeChatModel()
         messages = [HumanMessage(content="hi")]

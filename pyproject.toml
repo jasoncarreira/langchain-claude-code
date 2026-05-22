@@ -24,7 +24,16 @@ examples = [
     "langchain>=1.1.0",
     "langchain-community>=0.4.1",
 ]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    # Used in the runtime-injected-args skip test — verifies our bridge
+    # filters out tools annotated with langgraph's ``ToolRuntime``.
+    # Runtime is optional at production time (the helper falls back to
+    # returning False if langgraph isn't installed), so it lives in
+    # ``dev`` rather than core ``dependencies``.
+    "langgraph>=0.2",
+]
 
 [project.urls]
 Homepage = "https://github.com/agentmish/langchain-claude-code"
