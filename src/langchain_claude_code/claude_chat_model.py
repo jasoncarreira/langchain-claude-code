@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import inspect
+import logging
 import queue
 import threading
 from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, get_args, get_origin
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
@@ -40,6 +42,110 @@ from claude_agent_sdk import (
     tool as sdk_tool,
 )
 from langchain_claude_code.claude_code_tools import ClaudeTool, normalize_tools
+
+log = logging.getLogger(__name__)
+
+
+def _has_runtime_injected_args(tool: BaseTool) -> bool:
+    """Return True if any parameter of the tool's underlying function is
+    annotated with a langgraph-runtime injection marker
+    (``InjectedToolArg`` or one of its direct-injection subclasses,
+    notably ``ToolRuntime``).
+
+    Such tools require langgraph state (graph runtime, store, channels,
+    etc.) to be injected at invocation time by langgraph's ``ToolNode``.
+    They can't be bridged through MCP because the MCP transport
+    doesn't carry that state — invoking them directly via ``_arun(**args)``
+    raises ``TypeError: missing 1 required positional argument: 'runtime'``.
+
+    Returns ``False`` if the underlying callable can't be introspected
+    (defensive — we err on the side of including the tool and letting
+    a runtime failure surface, matching pre-fix behavior for non-injected
+    tools).
+    """
+    # Try the InjectedToolArg base class first (covers Annotated[..., InjectedToolArg(...)]).
+    try:
+        from langchain_core.tools.base import InjectedToolArg
+    except ImportError:
+        InjectedToolArg = None  # type: ignore[assignment]
+
+    # Direct-injection subclass is what ToolRuntime extends — params
+    # carry the raw type (not Annotated[]). Optional import: older
+    # langgraph versions don't have it.
+    try:
+        from langgraph.prebuilt.tool_node import _DirectlyInjectedToolArg
+    except ImportError:
+        _DirectlyInjectedToolArg = None  # type: ignore[assignment]
+
+    if InjectedToolArg is None and _DirectlyInjectedToolArg is None:
+        return False
+
+    # ``StructuredTool``-style: the wrapped callable is exposed as
+    # ``coroutine`` (async) or ``func`` (sync). ``BaseTool``-subclass
+    # style: the implementation lives in ``_arun`` / ``_run`` methods
+    # on the class. Inspect the most-specific class method to skip
+    # the framework's default-stub signature on the base class.
+    candidates: list[Any] = []
+    for attr in ("coroutine", "func"):
+        c = getattr(tool, attr, None)
+        if c is not None and callable(c):
+            candidates.append(c)
+    cls = type(tool)
+    for attr in ("_arun", "_run"):
+        m = cls.__dict__.get(attr)
+        if m is None:
+            # Walk MRO for overrides above ``BaseTool`` (which defines
+            # both as no-ops). Stop at langchain_core to avoid picking
+            # up the framework's signature.
+            for base in cls.__mro__[1:]:
+                if base.__module__.startswith("langchain_core"):
+                    break
+                if attr in base.__dict__:
+                    m = base.__dict__[attr]
+                    break
+        if m is not None and callable(m):
+            candidates.append(m)
+    if not candidates:
+        return False
+
+    for callable_ in candidates:
+        try:
+            sig = inspect.signature(callable_)
+        except (TypeError, ValueError):
+            continue
+        if _signature_has_injected_param(
+            sig, InjectedToolArg, _DirectlyInjectedToolArg,
+        ):
+            return True
+    return False
+
+
+def _signature_has_injected_param(
+    sig: inspect.Signature,
+    injected_tool_arg: type | None,
+    directly_injected_tool_arg: type | None,
+) -> bool:
+    """Helper for :func:`_has_runtime_injected_args` — scan one signature."""
+    for param in sig.parameters.values():
+        ann = param.annotation
+        if ann is inspect.Parameter.empty:
+            continue
+        # Direct-injection types (ToolRuntime[X, Y]): the param's annotation
+        # is the class itself, possibly subscripted with generics.
+        if directly_injected_tool_arg is not None:
+            origin = get_origin(ann) or ann
+            if isinstance(origin, type) and issubclass(
+                origin, directly_injected_tool_arg,
+            ):
+                return True
+        # Annotated[T, InjectedToolArg(...)] form: walk the metadata list.
+        if injected_tool_arg is not None:
+            for meta in get_args(ann)[1:] if get_origin(ann) is not None else ():
+                if isinstance(meta, type) and issubclass(meta, injected_tool_arg):
+                    return True
+                if isinstance(meta, injected_tool_arg):
+                    return True
+    return False
 
 
 class ClaudeCodeChatModel(BaseChatModel):
@@ -529,15 +635,42 @@ class ClaudeCodeChatModel(BaseChatModel):
         tool_choice: str | dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Runnable:
-        """Bind LangChain tools to the model via MCP server."""
+        """Bind LangChain tools to the model via MCP server.
+
+        Tools whose underlying function takes a langgraph-injected
+        parameter (notably ``ToolRuntime`` from
+        ``langgraph.prebuilt.tool_node``, or any ``InjectedToolArg``
+        subclass) are **skipped**: the MCP transport doesn't carry
+        langgraph state, so invoking them through the bridge fails
+        with ``TypeError: missing 1 required positional argument:
+        'runtime'``. Such tools are typically middleware-injected by
+        the agent framework (deepagents' filesystem tools, subagent
+        tools, etc.) and are already available to the model through
+        the framework's native path — bridging them via MCP is both
+        redundant and broken.
+        """
         sdk_tools = []
         tool_names = []
+        skipped: list[str] = []
 
         for lc_tool in tools:
+            if _has_runtime_injected_args(lc_tool):
+                # Can't bridge through MCP. Log and skip; the framework's
+                # native tool path will still serve this tool when the
+                # model needs it (it's typically also exposed there).
+                skipped.append(lc_tool.name)
+                continue
             schema = self._get_tool_schema(lc_tool)
             sdk_func = self._wrap_langchain_tool(lc_tool, schema)
             sdk_tools.append(sdk_func)
             tool_names.append(lc_tool.name)
+
+        if skipped:
+            log.info(
+                "skipped %d tool(s) with langgraph-injected args (can't "
+                "bridge through MCP): %s",
+                len(skipped), ", ".join(skipped),
+            )
 
         server = create_sdk_mcp_server(
             name="langchain-tools",
