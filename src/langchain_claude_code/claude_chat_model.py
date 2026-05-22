@@ -4,6 +4,7 @@ import asyncio
 import contextvars
 import queue
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Callable
@@ -32,6 +33,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     AssistantMessage,
+    HookMatcher,
     ResultMessage,
     TextBlock,
     ToolUseBlock,
@@ -345,6 +347,99 @@ class ClaudeCodeChatModel(BaseChatModel):
             kwargs["response_metadata"]["internal_tool_calls"] = tool_calls
         return AIMessage(**kwargs)
 
+    def _install_tool_event_hooks(
+        self, options: ClaudeAgentOptions,
+    ) -> list[dict[str, Any]]:
+        """Register PreToolUse / PostToolUse / PostToolUseFailure hooks
+        that capture every tool invocation — built-in (Bash, Read, Edit,
+        Write, Glob, ToolSearch), bridged LangChain tools, and MCP
+        tools — into the returned events list.
+
+        Why hooks: built-in tools execute entirely inside the claude
+        CLI subprocess. Their ``ToolResultBlock``s arrive in
+        ``UserMessage`` content (per the Anthropic API conversation
+        convention), which the message loops in ``_aquery`` / ``_astream``
+        don't iterate. The SDK fires PreToolUse / PostToolUse hooks for
+        EVERY tool invocation regardless of origin (see
+        ``claude_agent_sdk._internal.query``'s hook_callback dispatch),
+        with ``tool_use_id`` on both pre and post. Capturing via hooks:
+
+        * Surfaces built-in tool results (the only path that does).
+        * Pairs calls and results by ``tool_use_id`` (no name-matching
+          ambiguity for bridged tools, where the call carries the
+          MCP-prefixed name and the bridged result carries the bare
+          ``@tool`` name).
+        * Preserves the actual call→result→call→result execution order
+          (vs. ``_parse_assistant_message`` which splits content blocks
+          into parallel lists, losing order).
+
+        The returned list is later attached to ``generation_info["tool_events"]``
+        in ``_aquery`` and to the final result chunk's ``generation_info``
+        in ``_astream``. Items have shape:
+
+            {"type": "tool_call",   "tool_use_id": str, "name": str,
+             "input": dict,         "ts_mono_ns": int}
+            {"type": "tool_result", "tool_use_id": str, "name": str,
+             "result": Any,         "is_error": False, "ts_mono_ns": int}
+            {"type": "tool_result", "tool_use_id": str, "name": str,
+             "error": str,          "is_error": True,  "ts_mono_ns": int}
+
+        Mutates ``options.hooks``: appends our three callbacks to any
+        user-supplied hooks; never replaces them. Our callbacks return
+        ``{}`` so they don't influence control flow when chained with
+        user hooks (e.g. permission gates).
+        """
+        events: list[dict[str, Any]] = []
+
+        async def _pre_hook(
+            input_data: dict, tool_use_id: str, signal: Any,
+        ) -> dict:
+            events.append({
+                "type": "tool_call",
+                "ts_mono_ns": time.monotonic_ns(),
+                "tool_use_id": tool_use_id,
+                "name": input_data.get("tool_name", ""),
+                "input": input_data.get("tool_input", {}),
+            })
+            return {}
+
+        async def _post_hook(
+            input_data: dict, tool_use_id: str, signal: Any,
+        ) -> dict:
+            events.append({
+                "type": "tool_result",
+                "ts_mono_ns": time.monotonic_ns(),
+                "tool_use_id": tool_use_id,
+                "name": input_data.get("tool_name", ""),
+                "result": input_data.get("tool_response"),
+                "is_error": False,
+            })
+            return {}
+
+        async def _post_fail_hook(
+            input_data: dict, tool_use_id: str, signal: Any,
+        ) -> dict:
+            events.append({
+                "type": "tool_result",
+                "ts_mono_ns": time.monotonic_ns(),
+                "tool_use_id": tool_use_id,
+                "name": input_data.get("tool_name", ""),
+                "error": input_data.get("error"),
+                "is_error": True,
+            })
+            return {}
+
+        our_hooks: dict[str, list[HookMatcher]] = {
+            "PreToolUse": [HookMatcher(hooks=[_pre_hook])],
+            "PostToolUse": [HookMatcher(hooks=[_post_hook])],
+            "PostToolUseFailure": [HookMatcher(hooks=[_post_fail_hook])],
+        }
+        existing = dict(options.hooks) if options.hooks else {}
+        for event, matchers in our_hooks.items():
+            existing[event] = list(existing.get(event, [])) + matchers
+        options.hooks = existing
+        return events
+
     async def _aquery(
         self,
         prompt: str,
@@ -353,7 +448,7 @@ class ClaudeCodeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
         """Execute query and return parsed response.
-        
+
         Returns:
             Tuple of (content, tool_calls, generation_info)
         """
@@ -363,6 +458,7 @@ class ClaudeCodeChatModel(BaseChatModel):
             session_id = session_id or cfg.get("configurable", {}).get("session_id")
 
         options = self._build_options(**kwargs)
+        tool_events = self._install_tool_event_hooks(options)
 
         if session_id:
             options.resume = session_id
@@ -398,6 +494,8 @@ class ClaudeCodeChatModel(BaseChatModel):
 
         if all_tool_results:
             generation_info["tool_results"] = all_tool_results
+        if tool_events:
+            generation_info["tool_events"] = tool_events
 
         return "\n".join(all_text), all_tool_calls, generation_info
 
@@ -513,6 +611,7 @@ class ClaudeCodeChatModel(BaseChatModel):
             session_id = session_id or cfg.get("configurable", {}).get("session_id")
 
         options = self._build_options(**kwargs)
+        tool_events = self._install_tool_event_hooks(options)
 
         if session_id:
             options.resume = session_id
@@ -549,6 +648,8 @@ class ClaudeCodeChatModel(BaseChatModel):
                         generation_info["internal_tool_calls"] = tool_calls_buffer
                     if tool_results_buffer:
                         generation_info["internal_tool_results"] = tool_results_buffer
+                    if tool_events:
+                        generation_info["tool_events"] = tool_events
 
                     yield ChatGenerationChunk(
                         message=AIMessageChunk(content="", chunk_position="last"),

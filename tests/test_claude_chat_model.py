@@ -493,5 +493,162 @@ class ClaudeChatModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("usage", info)         # None → omitted
 
 
+
+    # ── _install_tool_event_hooks ────────────────────────────────────
+
+    def test_install_tool_event_hooks_registers_three_events(self):
+        """The helper must register PreToolUse, PostToolUse, and
+        PostToolUseFailure callbacks on the provided options. Each
+        event gets exactly one HookMatcher with one callback (ours)
+        when options.hooks was None."""
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        model = ClaudeCodeChatModel()
+        options = ClaudeAgentOptions(model="test")
+        events = model._install_tool_event_hooks(options)
+
+        self.assertEqual(events, [])  # No events fired yet
+        self.assertIsNotNone(options.hooks)
+        self.assertIn("PreToolUse", options.hooks)
+        self.assertIn("PostToolUse", options.hooks)
+        self.assertIn("PostToolUseFailure", options.hooks)
+        for event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+            self.assertEqual(len(options.hooks[event]), 1)
+
+    def test_install_tool_event_hooks_preserves_existing(self):
+        """User-supplied hooks must be preserved — our callbacks are
+        appended to the existing matcher list, not replaced. Critical
+        for operators who supply permission gates via PreToolUse."""
+        from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
+
+        async def user_pre(*_a, **_kw):
+            return {}
+
+        model = ClaudeCodeChatModel()
+        options = ClaudeAgentOptions(
+            model="test",
+            hooks={"PreToolUse": [HookMatcher(hooks=[user_pre])]},
+        )
+        model._install_tool_event_hooks(options)
+
+        # PreToolUse should have BOTH the user's hook AND ours.
+        self.assertEqual(len(options.hooks["PreToolUse"]), 2)
+        # PostToolUse and PostToolUseFailure get ours only.
+        self.assertEqual(len(options.hooks["PostToolUse"]), 1)
+        self.assertEqual(len(options.hooks["PostToolUseFailure"]), 1)
+
+    async def test_install_tool_event_hooks_callbacks_record_events(self):
+        """Invoke the registered callbacks directly with synthetic
+        SDK inputs and verify they append correctly-shaped events to
+        the returned list, paired by tool_use_id, with monotonic
+        timestamps."""
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        model = ClaudeCodeChatModel()
+        options = ClaudeAgentOptions(model="test")
+        events = model._install_tool_event_hooks(options)
+
+        pre_cb = options.hooks["PreToolUse"][0].hooks[0]
+        post_cb = options.hooks["PostToolUse"][0].hooks[0]
+        fail_cb = options.hooks["PostToolUseFailure"][0].hooks[0]
+
+        await pre_cb(
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+            "toolu_a", None,
+        )
+        await post_cb(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "tool_response": {"output": "f.txt"},
+            },
+            "toolu_a", None,
+        )
+        await fail_cb(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "/bin/false"},
+                "error": "exited 1",
+            },
+            "toolu_b", None,
+        )
+
+        self.assertEqual(len(events), 3)
+        call, ok_result, fail_result = events
+        self.assertEqual(call["type"], "tool_call")
+        self.assertEqual(call["tool_use_id"], "toolu_a")
+        self.assertEqual(call["name"], "Bash")
+        self.assertEqual(call["input"], {"command": "ls"})
+
+        self.assertEqual(ok_result["type"], "tool_result")
+        self.assertEqual(ok_result["tool_use_id"], "toolu_a")
+        self.assertEqual(ok_result["result"], {"output": "f.txt"})
+        self.assertFalse(ok_result["is_error"])
+
+        self.assertEqual(fail_result["type"], "tool_result")
+        self.assertEqual(fail_result["tool_use_id"], "toolu_b")
+        self.assertEqual(fail_result["error"], "exited 1")
+        self.assertTrue(fail_result["is_error"])
+
+        # Monotonic ordering — events recorded in registration order.
+        self.assertGreaterEqual(ok_result["ts_mono_ns"], call["ts_mono_ns"])
+        self.assertGreaterEqual(fail_result["ts_mono_ns"], ok_result["ts_mono_ns"])
+
+    async def test_aquery_attaches_tool_events_to_generation_info(self):
+        """End-to-end with stubbed SDK: after _aquery, the captured
+        tool_events list must be on generation_info. We manually invoke
+        the registered callbacks via a stub that captures the hooks
+        at __init__ time and fires them between the AssistantMessage
+        and ResultMessage."""
+        class HookFiringStub(StubClaudeSDKClient):
+            async def receive_response(self):
+                # Fire hooks the way the real SDK would, mid-loop.
+                pre = self.options.hooks["PreToolUse"][0].hooks[0]
+                post = self.options.hooks["PostToolUse"][0].hooks[0]
+                await pre(
+                    {"tool_name": "Read", "tool_input": {"file_path": "/a"}},
+                    "toolu_r1", None,
+                )
+                await post(
+                    {
+                        "tool_name": "Read",
+                        "tool_input": {"file_path": "/a"},
+                        "tool_response": "contents",
+                    },
+                    "toolu_r1", None,
+                )
+                for msg in self.responses:
+                    yield msg
+
+        HookFiringStub.preset_responses = [
+            AssistantMessage(
+                content=[TextBlock(text="done")], model="test",
+                parent_tool_use_id=None, error=None,
+            ),
+            ResultMessage(
+                subtype="result", duration_ms=1, duration_api_ms=1,
+                is_error=False, num_turns=1, session_id="s",
+                total_cost_usd=0.0, usage=None,
+                result=None, structured_output=None,
+            ),
+        ]
+
+        model = ClaudeCodeChatModel()
+        with patch(
+            "langchain_claude_code.claude_chat_model.ClaudeSDKClient",
+            HookFiringStub,
+        ):
+            res = await model.ainvoke([HumanMessage(content="hi")])
+
+        tool_events = res.response_metadata.get("tool_events")
+        self.assertIsNotNone(tool_events)
+        self.assertEqual(len(tool_events), 2)
+        self.assertEqual(tool_events[0]["type"], "tool_call")
+        self.assertEqual(tool_events[0]["name"], "Read")
+        self.assertEqual(tool_events[1]["type"], "tool_result")
+        self.assertEqual(tool_events[1]["tool_use_id"], "toolu_r1")
+
+
+
 if __name__ == "__main__":
     unittest.main()
