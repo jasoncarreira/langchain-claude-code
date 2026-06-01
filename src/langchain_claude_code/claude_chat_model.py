@@ -215,6 +215,15 @@ class ClaudeCodeChatModel(BaseChatModel):
     disallowed_tools: list[str | ClaudeTool] = Field(default_factory=list, description="Disallowed tools")
     max_turns: int | None = Field(default=None, description="Max conversation turns")
     max_budget_usd: float | None = Field(default=None, description="Max budget in USD")
+    effort: str | int | None = Field(
+        default=None,
+        description=(
+            "Reasoning effort forwarded to ClaudeAgentOptions.effort "
+            "(e.g. 'low'/'medium'/'high'/'max', or an int token budget). "
+            "None leaves Claude's adaptive default. Silently dropped if the "
+            "installed claude-agent-sdk predates the effort option."
+        ),
+    )
     cwd: str | Path | None = Field(default=None, description="Working directory")
     include_partial_messages: bool = Field(
         default=False, description="Enable partial message streaming"
@@ -317,6 +326,10 @@ class ClaudeCodeChatModel(BaseChatModel):
             opts["max_turns"] = self.max_turns
         if self.max_budget_usd is not None:
             opts["max_budget_usd"] = self.max_budget_usd
+        if self.effort is not None:
+            # Kept by the allowed_keys filter below iff the installed
+            # claude-agent-sdk exposes ``effort`` (else dropped gracefully).
+            opts["effort"] = self.effort
         if self.cwd:
             opts["cwd"] = self.cwd
         if self._mcp_servers:
