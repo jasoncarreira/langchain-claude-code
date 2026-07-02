@@ -1,0 +1,47 @@
+name: Publish to PyPI
+
+# Publishes langchain-claude-code-mimir to PyPI via OIDC trusted publishing
+# (no API token stored). Fires on a version tag push (v*) or a manual run.
+# PyPI verifies the OIDC claim against the trusted-publisher config registered
+# for this project (owner: jasoncarreira, repo: langchain-claude-code,
+# workflow: publish.yml, environment: <blank>). Register a "pending publisher"
+# on pypi.org BEFORE the first run, or the publish step fails OIDC verification.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Build
+        run: uv build
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI (trusted publishing)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # The ONLY extra permission trusted publishing needs: mint an OIDC
+      # token the workflow presents to PyPI. No username/password/api-token.
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
