@@ -2,7 +2,10 @@ version = 1
 revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
-    "python_full_version >= '3.13'",
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform != 'win32'",
     "python_full_version < '3.13'",
 ]
 
@@ -416,17 +419,20 @@ wheels = [
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.1.10"
+version = "0.2.110"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
+    { name = "sniffio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/51/13/a6c08fd20f12dcc685c852221c7159cb902580cf5f626b59be6c942f4644/claude_agent_sdk-0.1.10.tar.gz", hash = "sha256:fda9a520c9904f0d00a15c36e2530ac174a6c29a4c4555ee4c8ec8f35af5fd08", size = 51302, upload-time = "2025-11-25T16:01:14.611Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/98/8fdab35ed9e1a36bc7afab4d390cc5002094a4950996c079da9aa4541cc4/claude_agent_sdk-0.2.110.tar.gz", hash = "sha256:538b548bac07a22f65686abab063a902ac76ba35989d0f073c942f96248e9fa3", size = 255632, upload-time = "2026-06-24T22:11:52.342Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9a/08/710efbe4a4090bcb6e7aff16e5fa03867b19bfa9bc1814973da5d4e5cc5d/claude_agent_sdk-0.1.10-py3-none-macosx_11_0_arm64.whl", hash = "sha256:2be5c3da0cf9959db817d7ff01ab87d94f68c5625efc7c11c7af94abcdd11b83", size = 49449922, upload-time = "2025-11-25T16:01:01.787Z" },
-    { url = "https://files.pythonhosted.org/packages/fe/f0/6ec298fa1921551c6a8e4d4bc2caf5f75728219a4b58e537985d36717049/claude_agent_sdk-0.1.10-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:f2576d7429753c3b8081a4c377855940b95a3359552fadbedef7f0fcdc01d8ca", size = 65319866, upload-time = "2025-11-25T16:01:05.697Z" },
-    { url = "https://files.pythonhosted.org/packages/83/30/11d101012e5b02361bd645e590498894a7bf30586a2b4626500e5157c872/claude_agent_sdk-0.1.10-py3-none-win_amd64.whl", hash = "sha256:a76567eb07143ad49617e30a41e41756a2542ff9986b83ec77b0d54ba2fa5cfa", size = 68211967, upload-time = "2025-11-25T16:01:10.526Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/93/29d4fdaa13e69034faf8d3503df915b07c820e2c08e3d6a7515149cde5bb/claude_agent_sdk-0.2.110-py3-none-macosx_11_0_arm64.whl", hash = "sha256:fed0e0f4804d9f9cff80ab7d1b44142ebd1046cdd29ca74caef4c92c35fff8d8", size = 64924533, upload-time = "2026-06-24T22:11:55.612Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/03/b40bb673cd93cdc3928262c1be75fde34a7bed4bf2c2c20e04218e2005ea/claude_agent_sdk-0.2.110-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:62b23869d46cef6f6ff1d00ceaa5e846e2f1d297478421c835efb8fe99369d4f", size = 69704449, upload-time = "2026-06-24T22:11:59.149Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/18/ab67cb5ce641333385bed55ed8e9665c00f7d30d1f6ab12f8463ddb7695f/claude_agent_sdk-0.2.110-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:324e49553c6303d6b267217dc2912652b97af2bc96503efd12095ae915b46b83", size = 74879555, upload-time = "2026-06-24T22:12:03.25Z" },
+    { url = "https://files.pythonhosted.org/packages/91/88/3627d7d14310cfec66977551263e219365244a906fc7ca1209fb0c3a6cec/claude_agent_sdk-0.2.110-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:56371dd7a2c66c0bd497dc0b3cab4193a228b196f600676393d69c0ecee37cfb", size = 75924237, upload-time = "2026-06-24T22:12:07.183Z" },
+    { url = "https://files.pythonhosted.org/packages/49/79/c9066c5c387d42c19a4b675ec1ff5219f8920cfda8ff8b527119fd69b774/claude_agent_sdk-0.2.110-py3-none-win_amd64.whl", hash = "sha256:4235d4de6d685a189c12612095ab192b759280ede1f3aed0c3e784d52c3555f9", size = 75448209, upload-time = "2026-06-24T22:12:11.283Z" },
 ]
 
 [[package]]
@@ -1022,7 +1028,7 @@ wheels = [
 
 [[package]]
 name = "langchain-claude-code-mimir"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },
@@ -1044,12 +1050,12 @@ examples = [
 
 [package.metadata]
 requires-dist = [
-    { name = "claude-agent-sdk", specifier = ">=0.1.10" },
+    { name = "claude-agent-sdk", specifier = ">=0.2,<0.3" },
     { name = "ddgs", marker = "extra == 'examples'", specifier = ">=9.9.2" },
     { name = "deepagents", marker = "extra == 'examples'", specifier = ">=0.2.8" },
     { name = "langchain", marker = "extra == 'examples'", specifier = ">=1.1.0" },
     { name = "langchain-community", marker = "extra == 'examples'", specifier = ">=0.4.1" },
-    { name = "langchain-core", specifier = ">=0.3.0" },
+    { name = "langchain-core", specifier = ">=1.0,<2" },
     { name = "langgraph", marker = "extra == 'dev'", specifier = ">=0.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
@@ -1299,7 +1305,7 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.22.0"
+version = "1.28.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1317,9 +1323,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a3/a2/c5ec0ab38b35ade2ae49a90fada718fbc76811dc5aa1760414c6aaa6b08a/mcp-1.22.0.tar.gz", hash = "sha256:769b9ac90ed42134375b19e777a2858ca300f95f2e800982b3e2be62dfc0ba01", size = 471788, upload-time = "2025-11-20T20:11:28.095Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6e/77/9450b8f251a13affb6281997d0523c4615f8a8b35d0b21ff30db3a5aac9d/mcp-1.28.1.tar.gz", hash = "sha256:d51e36a5f5644faea4f85ea649bfffa6bc6c26770d42798ad6a3de3d2ba69683", size = 638501, upload-time = "2026-06-26T12:57:29.093Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/bb/711099f9c6bb52770f56e56401cdfb10da5b67029f701e0df29362df4c8e/mcp-1.22.0-py3-none-any.whl", hash = "sha256:bed758e24df1ed6846989c909ba4e3df339a27b4f30f1b8b627862a4bade4e98", size = 175489, upload-time = "2025-11-20T20:11:26.542Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/5e/d118fce19f87a2e7d8101c35c8ae0ec289098a4df0ff244cec23e415aca0/mcp-1.28.1-py3-none-any.whl", hash = "sha256:2726bca5e7193f61c5dde8b12500a6de2d9acf6d1a1c0be9e8c2e706437991df", size = 222620, upload-time = "2026-06-26T12:57:27.218Z" },
 ]
 
 [[package]]
