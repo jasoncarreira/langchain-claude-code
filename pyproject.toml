@@ -1,11 +1,12 @@
 [project]
-name = "langchain-claude-code"
-version = "0.1.0"
-description = "LangChain chat model wrapper for Claude Code Agent SDK"
+name = "langchain-claude-code-mimir"
+version = "0.1.1"
+description = "LangChain chat model wrapper for the Claude Code Agent SDK — Mimir distribution of langchain-claude-code with bundled adapter fixes (upstream PRs #2/#4/#6, unmerged). Import package remains ``langchain_claude_code``."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Tomas Roda", email = "dev@tomasroda.com" }]
+maintainers = [{ name = "Jason Carreira" }]
 keywords = ["langchain", "claude", "anthropic", "agent", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -36,9 +37,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/agentmish/langchain-claude-code"
-Repository = "https://github.com/agentmish/langchain-claude-code"
-Issues = "https://github.com/agentmish/langchain-claude-code/issues"
+Homepage = "https://github.com/jasoncarreira/langchain-claude-code"
+Repository = "https://github.com/jasoncarreira/langchain-claude-code"
+Issues = "https://github.com/jasoncarreira/langchain-claude-code/issues"
+Upstream = "https://github.com/agentmish/langchain-claude-code"
 
 [build-system]
 requires = ["hatchling"]
