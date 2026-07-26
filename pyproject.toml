@@ -1,6 +1,17 @@
 [project]
-name = "langchain-claude-code"
-version = "0.1.0"
+# Published as ``langchain-claude-code-mimir``: upstream
+# (thehumanworks/langchain-claude-code) is dormant, so this fork carries the
+# adapter-level fixes Mimir depends on and ships under its own distribution
+# name. The import package stays ``langchain_claude_code``, so consumers keep
+# writing ``from langchain_claude_code import ChatClaudeCode``.
+#
+# Keep the name and version here, in version control. 0.1.1 and 0.1.2 were
+# published with the rename and bump applied out of band, which left the repo
+# declaring 0.1.0 with no tags, so nothing recorded what a release contained.
+# Tag v0.1.2 marks the source verified byte-identical to the published 0.1.2
+# sdist. Bump this version in the release commit and tag that commit.
+name = "langchain-claude-code-mimir"
+version = "0.1.2"
 description = "LangChain chat model wrapper for Claude Code Agent SDK"
 readme = "README.md"
 license = "MIT"
