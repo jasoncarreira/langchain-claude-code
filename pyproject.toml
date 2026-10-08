@@ -1,6 +1,6 @@
 [project]
 name = "langchain-claude-code-mimir"
-version = "0.1.2"
+version = "0.1.3"
 description = "LangChain chat model wrapper for the Claude Code Agent SDK — Mimir distribution of langchain-claude-code with bundled adapter fixes (upstream PRs #2/#4/#6, unmerged). Import package remains ``langchain_claude_code``."
 readme = "README.md"
 license = "MIT"

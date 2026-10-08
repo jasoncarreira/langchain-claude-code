@@ -836,7 +836,18 @@ class ClaudeCodeChatModel(BaseChatModel):
         ).bind(**kwargs)
 
     def _get_tool_schema(self, tool: BaseTool) -> dict[str, Any]:
-        """Extract JSON schema from LangChain tool."""
+        """Extract JSON schema from LangChain tool.
+
+        Prefers ``tool_call_schema``, which omits injected parameters such as
+        ``config`` / ``InjectedToolArg`` fields, so Claude Code is never asked
+        to supply them. Falls back to ``args_schema``.
+        """
+        call_schema = getattr(tool, "tool_call_schema", None)
+        if call_schema is not None and hasattr(call_schema, "model_json_schema"):
+            try:
+                return call_schema.model_json_schema()
+            except Exception:
+                pass
         if hasattr(tool, "args_schema") and tool.args_schema:
             try:
                 return tool.args_schema.model_json_schema()
@@ -871,10 +882,14 @@ class ClaudeCodeChatModel(BaseChatModel):
         @sdk_tool(tool.name, tool.description or "", param_types)
         async def wrapped_tool(args: dict[str, Any]) -> dict[str, Any]:
             try:
-                if hasattr(tool, "_arun") and asyncio.iscoroutinefunction(tool._arun):
-                    result = await tool._arun(**args)
-                else:
-                    result = tool._run(**args)
+                # Call through the public Runnable API. ``ainvoke`` validates
+                # the args, supplies the ``config`` that langchain-core 1.x
+                # requires (calling ``_arun(**args)`` directly fails with
+                # "missing 1 required keyword-only argument: 'config'"),
+                # injects ``config`` into tools that declare it (ignoring a
+                # model-supplied ``config`` key), and runs sync tools in an
+                # executor.
+                result = await tool.ainvoke(args)
 
                 captured = self._tool_results_var.get(None) if self._tool_results_var else None
                 if captured is not None:

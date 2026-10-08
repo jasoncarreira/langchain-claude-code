@@ -1,12 +1,14 @@
 import asyncio
 import unittest
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 from claude_agent_sdk import ToolResultBlock
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.tools import BaseTool
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool, InjectedToolArg, ToolException
+from langchain_core.tools import tool as lc_tool
 from pydantic import BaseModel, PrivateAttr
 from unittest.mock import AsyncMock, patch
 
@@ -118,6 +120,77 @@ class ClaudeChatModelTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tool._called, "arun")
         self.assertEqual(result["content"][0]["text"], "PING")
+
+    def _run_bridged(self, tool, args):
+        model = ClaudeCodeChatModel()
+        wrapped = model._wrap_langchain_tool(tool, model._get_tool_schema(tool))
+        return asyncio.run(wrapped.handler(args))
+
+    def test_bridged_async_structured_tool_runs(self):
+        # langchain-core 1.x StructuredTool._arun requires a keyword-only
+        # ``config``; calling ``_arun(**args)`` fails. The bridge must go
+        # through the public Runnable API.
+        @lc_tool
+        async def shout(text: str) -> str:
+            """Upper-case the text."""
+            return text.upper()
+
+        result = self._run_bridged(shout, {"text": "ping"})
+
+        self.assertNotIn("is_error", result)
+        self.assertEqual(result["content"][0]["text"], "PING")
+
+    def test_bridged_sync_structured_tool_runs(self):
+        @lc_tool
+        def add(a: int, b: int) -> int:
+            """Add two numbers."""
+            return a + b
+
+        result = self._run_bridged(add, {"a": 2, "b": 3})
+
+        self.assertNotIn("is_error", result)
+        self.assertEqual(result["content"][0]["text"], "5")
+
+    def test_bridged_tool_with_config_param_hides_and_injects_config(self):
+        seen: dict[str, Any] = {}
+
+        @lc_tool
+        async def configured(text: str, config: RunnableConfig) -> str:
+            """Echo the text and record the injected config."""
+            seen["config"] = config
+            return text
+
+        schema = ClaudeCodeChatModel()._get_tool_schema(configured)
+        self.assertNotIn("config", schema.get("properties", {}))
+
+        # A leaked ``config`` argument from the model must not collide with
+        # the injected one.
+        result = self._run_bridged(configured, {"text": "hi", "config": {"x": 1}})
+
+        self.assertNotIn("is_error", result)
+        self.assertEqual(result["content"][0]["text"], "hi")
+        self.assertIsInstance(seen["config"], dict)
+
+    def test_tool_schema_omits_injected_args(self):
+        @lc_tool
+        def whoami(text: str, user_id: Annotated[str, InjectedToolArg]) -> str:
+            """Echo text for an injected user."""
+            return f"{user_id}:{text}"
+
+        self.assertIn("user_id", whoami.args_schema.model_json_schema()["properties"])
+        schema = ClaudeCodeChatModel()._get_tool_schema(whoami)
+        self.assertEqual(set(schema["properties"]), {"text"})
+
+    def test_bridged_tool_error_is_reported(self):
+        @lc_tool
+        def boom(text: str) -> str:
+            """Always fails."""
+            raise ToolException("nope")
+
+        result = self._run_bridged(boom, {"text": "x"})
+
+        self.assertTrue(result["is_error"])
+        self.assertIn("nope", result["content"][0]["text"])
 
     async def test_resume_from_thread_sets_session_id(self):
         StubClaudeSDKClient.preset_responses = [
